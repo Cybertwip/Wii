@@ -143,9 +143,9 @@ namespace {
             if (idx < (int)g_state.texStages.size()) {
                 g_state.texStages[idx].base_addr = (val & 0xFFFFFF) << 5;
             }
-        } else if ((reg >= 0x98 && reg <= 0x9F) || (reg >= 0xB8 && reg <= 0xBF)) {
+        } else if ((reg >= 0x98 && reg <= 0x9B) || (reg >= 0xB8 && reg <= 0xBB)) {
 
-            int idx = (reg >= 0x98 && reg <= 0x9F) ? (reg - 0x98) : (reg - 0xB8 + 4);
+            int idx = (reg >= 0x98 && reg <= 0x9B) ? (reg - 0x98) : (reg - 0xB8 + 4);
             if (idx < (int)g_state.texStages.size()) {
                 g_state.texStages[idx].tlut_offset = (val & 0x3FF) << 9;
                 g_state.texStages[idx].tlut_format = (val >> 10) & 0x3;
@@ -737,8 +737,7 @@ void FifoParser::DecodeDraw(GXCommand& c) {
                             r.vat.posShift, r.arrayBase[0], r.arrayStride[0],
                             r.vat.posElements ? 3 : 2, vtx.pos))
             return;
-        // CLR1 and tex1-7 are parsed for stream position only (the renderer
-        // uses clr0/tex0). Normals are decoded only for lit draws.
+        // CLR1 is consumed for stream alignment. Normals are decoded for lit draws.
         // Three indices when NBT normals arrive by index: consume the extra two
         // so the stream position stays right even though only the normal is
         // used. Getting this wrong is invisible on this vertex and fatal on
@@ -775,17 +774,16 @@ void FifoParser::DecodeDraw(GXCommand& c) {
             vtx.color[2] = col[2]; vtx.color[3] = col[3];
         }
         off += AttrBytes(r.vat.clrMask[1], r.vat.clrType[1], 1, true);
-        if (r.vat.texMask[0] != VtxAttrMask::None) {
-            vtx.has_tex[0] = true;
-            if (!ReadVectorAttr(buf, off, buf_size, r.vat.texMask[0],
-                                r.vat.texType[0], r.vat.texShift[0],
-                                r.arrayBase[4], r.arrayStride[4],
-                                r.vat.texElements[0] ? 2 : 1, vtx.tex[0]))
+        for (int t = 0; t < 8; ++t) {
+            if (r.vat.texMask[t] == VtxAttrMask::None) continue;
+            vtx.has_tex[t] = true;
+            vtx.tex[t][0] = vtx.tex[t][1] = 0;
+            if (!ReadVectorAttr(buf, off, buf_size, r.vat.texMask[t],
+                                r.vat.texType[t], r.vat.texShift[t],
+                                r.arrayBase[4 + t], r.arrayStride[4 + t],
+                                r.vat.texElements[t] ? 2 : 1, vtx.tex[t]))
                 return;
         }
-        for (int t = 1; t < 8; t++)
-            off += AttrBytes(r.vat.texMask[t], r.vat.texType[t],
-                             r.vat.texElements[t] ? 2 : 1, false);
         if (off > buf_size)
             return;
 

@@ -23,6 +23,8 @@ GeneratedShader GenerateTEVShader(const GXState& state, uint8_t prim_type) {
     vs << "layout(location = 1) in vec4 vertexColor;\n";
     vs << "layout(location = 2) in vec2 vertexTexCoord;\n";
     vs << "layout(location = 3) in vec3 vertexNormal;\n";
+    for (int i = 1; i < 8; ++i)
+        vs << "layout(location = " << 3 + i << ") in vec2 vertexTexCoord" << i << ";\n";
 
     vs << "out vec4 vColor0;\n";
     vs << "out vec4 vColor1;\n";
@@ -109,7 +111,7 @@ vec4 dolphin_chan(int chan, vec3 pos, vec3 nrm, vec4 vcol) {
     vs << "    vColor1 = dolphin_chan(1, vertexPosition, vertexNormal, vertexColor);\n";
     for (int i = 0; i < 8; ++i)
         vs << "    vTex" << i << " = (uTexMtx[" << i
-           << "] * vec4(vertexTexCoord, 0.0, 1.0)).xy;\n";
+           << "] * vec4(vertexTexCoord" << (i ? std::to_string(i) : "") << ", 0.0, 1.0)).xy;\n";
     vs << "}\n";
     shader.vertex_source = vs.str();
 
@@ -160,6 +162,18 @@ vec4 dolphin_chan(int chan, vec3 pos, vec3 nrm, vec4 vcol) {
             fs << "    texColor = vec4(1.0);\n";
         }
         
+        // Each TEV stage selects independent texture and raster swizzle tables.
+        auto swap = [&](unsigned table) {
+            const char* channels = "rgba";
+            uint32_t rg = state.bp[0xF6 + table * 2];
+            uint32_t ba = state.bp[0xF7 + table * 2];
+            return std::string{channels[rg & 3], channels[(rg >> 2) & 3],
+                               channels[ba & 3], channels[(ba >> 2) & 3]};
+        };
+        const uint32_t alpha_env = state.bp[0xC1 + i * 2];
+        fs << "    texColor = texColor." << swap((alpha_env >> 2) & 3) << ";\n";
+        fs << "    rasColor = rasColor." << swap(alpha_env & 3) << ";\n";
+
         uint32_t ksel_reg = state.bp[0xF6 + (i / 2)];
         int kcsel = 0, kasel = 0;
         if ((i % 2) == 0) {

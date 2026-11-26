@@ -1,4 +1,5 @@
 #include "runtime/cpu_context.h"
+#include "runtime/config.h"
 #include "runtime/gx/fifo_parser.h"
 #include "runtime/gx/renderer.h"
 #include "runtime/gx/tev_shader_gen.h"
@@ -44,7 +45,7 @@ uint64_t g_stat_shaders = 0;
 struct BatchVertex {
   float x, y, z;
   float r, g, b, a;
-  float u, v;
+  float uv[8][2];
   float nx, ny, nz;
 };
 
@@ -62,6 +63,18 @@ static GLuint CompileShader(const char *vs, const char *fs) {
   glShaderSource(f, 1, &fs, nullptr);
   glCompileShader(f);
 
+  for (GLuint shader : {v, f}) {
+    GLint ok = 0;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+      char log[4096] = {};
+      glGetShaderInfoLog(shader, sizeof(log), nullptr, log);
+      fprintf(stderr, "[GX] Shader compilation failed: %s\n", log);
+      glDeleteShader(v);
+      glDeleteShader(f);
+      return 0;
+    }
+  }
   GLuint p = glCreateProgram();
   glAttachShader(p, v);
   glAttachShader(p, f);
@@ -69,6 +82,15 @@ static GLuint CompileShader(const char *vs, const char *fs) {
 
   glDeleteShader(v);
   glDeleteShader(f);
+  GLint ok = 0;
+  glGetProgramiv(p, GL_LINK_STATUS, &ok);
+  if (!ok) {
+    char log[4096] = {};
+    glGetProgramInfoLog(p, sizeof(log), nullptr, log);
+    fprintf(stderr, "[GX] Shader link failed: %s\n", log);
+    glDeleteProgram(p);
+    return 0;
+  }
   return p;
 }
 
@@ -90,7 +112,12 @@ static void FlushBatch() {
     glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, sizeof(BatchVertex),
                           (void *)offsetof(BatchVertex, r));
     glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(BatchVertex),
-                          (void *)offsetof(BatchVertex, u));
+                          (void *)offsetof(BatchVertex, uv));
+    for (int i = 1; i < 8; ++i) {
+      glEnableVertexAttribArray(3 + i);
+      glVertexAttribPointer(3 + i, 2, GL_FLOAT, GL_FALSE, sizeof(BatchVertex),
+                            (void *)(offsetof(BatchVertex, uv) + i * 2 * sizeof(float)));
+    }
     glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, sizeof(BatchVertex),
                           (void *)offsetof(BatchVertex, nx));
   }
@@ -284,20 +311,21 @@ static void EmitVertex(const VertexData &vtx) {
       bv.nx = vtx.norm[0]; bv.ny = vtx.norm[1]; bv.nz = vtx.norm[2];
     }
   }
-  if (vtx.has_tex[0]) {
-    bv.u = vtx.tex[0][0];
-    bv.v = vtx.tex[0][1];
-    // Texgen: transform the input UV by its texture matrix (shared XF matrix
-    // memory). GX tex matrices live at indices 30-60; anything below is a
-    // position matrix, so treat that as pass-through. Zero matrices (an
-    // index the game never loaded) also fall back, to avoid collapsing UVs.
-    int ti = vtx.texMtxIdx[0];
-    if (g_state.numTexGens > 0 && ti >= 30 && ti * 4 + 8 <= 256) {
+  for (int i = 0; i < 8; ++i) {
+    // XF texgen source rows 5..12 select the eight incoming UV attributes.
+    const unsigned row = (g_state.xf[0x40 + i] >> 7) & 31;
+    int source = row >= 5 && row <= 12 ? int(row - 5) : i;
+    if (!vtx.has_tex[source]) source = vtx.has_tex[i] ? i : 0;
+    if (!vtx.has_tex[source]) continue;
+    const float u = vtx.tex[source][0], v = vtx.tex[source][1];
+    bv.uv[i][0] = u;
+    bv.uv[i][1] = v;
+    int ti = vtx.texMtxIdx[i];
+    if (i < g_state.numTexGens && ti >= 30 && ti * 4 + 8 <= 256) {
       const float *m = &g_state.posMatrices[ti * 4];
       if (m[0] || m[1] || m[3] || m[4] || m[5] || m[7]) {
-        float s = vtx.tex[0][0], t = vtx.tex[0][1];
-        bv.u = m[0] * s + m[1] * t + m[2] + m[3];
-        bv.v = m[4] * s + m[5] * t + m[6] + m[7];
+        bv.uv[i][0] = m[0] * u + m[1] * v + m[2] + m[3];
+        bv.uv[i][1] = m[4] * u + m[5] * v + m[6] + m[7];
       }
     }
   }
@@ -331,7 +359,7 @@ static void EmitVertex(const VertexData &vtx) {
     if (vn++ < 14)
       printf("[VTX] raw=(%.1f,%.1f,%.1f) view=(%.1f,%.1f,%.1f) uv=(%.3f,%.3f) "
              "tex0=%ux%u fmt=%u\n",
-             vtx.pos[0], vtx.pos[1], vtx.pos[2], bv.x, bv.y, bv.z, bv.u, bv.v,
+             vtx.pos[0], vtx.pos[1], vtx.pos[2], bv.x, bv.y, bv.z, bv.uv[0][0], bv.uv[0][1],
              g_state.texStages[0].width, g_state.texStages[0].height,
              g_state.texStages[0].format);
   }
@@ -424,6 +452,10 @@ static void SetupDrawState(const GXCommand &cmd) {
   auto it = s_shader_cache.find(hash);
   if (it != s_shader_cache.end()) {
     s_active_shader = it->second;
+    if (!s_active_shader.id) {
+      s_skip_draw = true;
+      return;
+    }
   } else if (s_compiles_this_frame >= kMaxCompilesPerFrame) {
     // Shader not compiled yet and out of budget this frame: skip the draw
     // rather than render this geometry with whatever shader is bound —
@@ -450,6 +482,11 @@ static void SetupDrawState(const GXCommand &cmd) {
     sh.uTevColor = sh.uTevKColor = -1;
     sh.id =
         CompileShader(src.vertex_source.c_str(), src.fragment_source.c_str());
+    if (!sh.id) {
+      s_shader_cache.emplace(hash, sh);
+      s_skip_draw = true;
+      return;
+    }
     static const bool s_shdump2 = std::getenv("NWII_SHADERDUMP") != nullptr;
     if (s_shdump2) {
       static int vn2 = 0;
@@ -520,7 +557,7 @@ static void SetupDrawState(const GXCommand &cmd) {
   ApplyCullMode();
 
   for (int i = 0; i < 8; ++i) {
-    if (g_state.texStages[i].base_addr != 0 && s_active_shader.uTex[i] >= 0) {
+    if (s_active_shader.uTex[i] >= 0) {
       glUniform1i(s_active_shader.uTex[i], i);
     }
   }
@@ -741,8 +778,28 @@ public:
             if (!tex)
               glGenTextures(1, &tex);
             glBindTexture(GL_TEXTURE_2D, tex);
-            glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, g_state.efbSrcX,
-                             g_state.efbSrcY, w, h, 0);
+            const int scale = Config::get().resolution_scale;
+            const int x = g_state.efbSrcX * scale;
+            const int y = (480 - int(g_state.efbSrcY)) * scale;
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w * scale, h * scale,
+                         0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+            // GX coordinates start at the top-left. Store the copy with row
+            // zero at the top, consistent with decoded and replacement textures.
+            GLint draw_fbo = 0, read_fbo = 0;
+            glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw_fbo);
+            glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read_fbo);
+            static GLuint copy_fbo = 0;
+            if (!copy_fbo) glGenFramebuffers(1, &copy_fbo);
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, draw_fbo);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, copy_fbo);
+            glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                   GL_TEXTURE_2D, tex, 0);
+            glBlitFramebuffer(x, y, x + w * scale, y - h * scale,
+                              0, 0, w * scale, h * scale, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+            glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                   GL_TEXTURE_2D, 0, 0);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, draw_fbo);
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, read_fbo);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
             nwii::runtime::hle::TextureCache::get().register_efb_texture(dest,
@@ -759,16 +816,29 @@ public:
         }
       } else if (cmd.type == GXCommandType::DrawPrimitive) {
 
-        if (!s_batch_open && g_ctx_ptr) {
+        if ((!s_batch_open || s_batch_prim != cmd.prim_type) && g_ctx_ptr) {
+          FlushBatch();
+          auto &cache = nwii::runtime::hle::TextureCache::get();
+          cache.begin_batch();
+          static GLuint samplers[8] = {};
+          if (!samplers[0]) glGenSamplers(8, samplers);
           for (int i = 0; i < 8; ++i) {
+            glActiveTexture(GL_TEXTURE0 + i);
             const auto &stage = g_state.texStages[i];
-            if (stage.base_addr != 0 && stage.width > 0 && stage.height > 0) {
-              GLuint tex = nwii::runtime::hle::TextureCache::get().get_texture(
-                  *g_ctx_ptr, stage);
-              glActiveTexture(GL_TEXTURE0 + i);
-              glBindTexture(GL_TEXTURE_2D, tex);
-            }
+            GLuint tex = 0;
+            if (stage.base_addr != 0 && stage.width > 0 && stage.height > 0)
+              tex = cache.get_texture(*g_ctx_ptr, stage);
+            glBindTexture(GL_TEXTURE_2D, tex);
+            const uint32_t mode = g_state.bp[(i < 4 ? 0x80 : 0xA0) + (i & 3)];
+            const GLenum wraps[] = {GL_CLAMP_TO_EDGE, GL_REPEAT, GL_MIRRORED_REPEAT, GL_CLAMP_TO_EDGE};
+            glBindSampler(i, samplers[i]);
+            glSamplerParameteri(samplers[i], GL_TEXTURE_WRAP_S, wraps[mode & 3]);
+            glSamplerParameteri(samplers[i], GL_TEXTURE_WRAP_T, wraps[(mode >> 2) & 3]);
+            glSamplerParameteri(samplers[i], GL_TEXTURE_MAG_FILTER, (mode & 0x10) ? GL_LINEAR : GL_NEAREST);
+            // Base-level sampling until GX mip chains are uploaded.
+            glSamplerParameteri(samplers[i], GL_TEXTURE_MIN_FILTER, (mode & 0x80) ? GL_LINEAR : GL_NEAREST);
           }
+          glActiveTexture(GL_TEXTURE0);
         }
         DrawPrimitive(cmd);
       }

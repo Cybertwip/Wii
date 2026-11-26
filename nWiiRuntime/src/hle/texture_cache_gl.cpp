@@ -27,12 +27,16 @@ void TextureCache::clear() {
     // renderer's copy path and re-filled every EFB copy.
 }
 
+void TextureCache::begin_batch() {
+    if (cache.size() > 512) clear();
+}
+
 void TextureCache::register_efb_texture(uint32_t addr, GLuint tex) {
-    efb_textures[addr & 0x01FFFFFF] = tex;
+    efb_textures[addr & 0x3FFFFFFF] = tex;
 }
 
 GLuint TextureCache::find_efb_texture(uint32_t addr) const {
-    auto it = efb_textures.find(addr & 0x01FFFFFF);
+    auto it = efb_textures.find(addr & 0x3FFFFFFF);
     return it == efb_textures.end() ? 0 : it->second;
 }
 
@@ -116,9 +120,6 @@ GLuint TextureCache::get_texture(CPUContext& ctx, const gx::TexStage& stage) {
     if (it != cache.end()) {
         return it->second;
     }
-
-    if (cache.size() > 512)
-        clear();
 
     if (const uint8_t* raw = ctx.mmu.get_ptr(stage.base_addr)) {
         uint32_t paddr = stage.base_addr & 0x3FFFFFFFu;

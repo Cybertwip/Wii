@@ -85,6 +85,7 @@ public:
     GLuint find_efb_texture(uint32_t addr) const;
 
     void clear();
+    void begin_batch();
 
 private:
     TextureCache() = default;
