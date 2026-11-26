@@ -1,0 +1,346 @@
+#!/usr/bin/env python3
+"""Register extracted Wii/GameCube games, build native packages, and run them."""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import plistlib
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import tomllib
+
+ROOT = Path(__file__).resolve().parent
+STATE = ROOT / '.wiirecomp'
+REGISTRY = STATE / 'games.json'
+HOST_BUILD = ROOT / 'build'
+
+
+def save(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, delete=False) as handle:
+        json.dump(data, handle, indent=2)
+        handle.write('\n')
+    os.replace(handle.name, path)
+
+
+def registry():
+    if REGISTRY.exists():
+        return json.loads(REGISTRY.read_text())
+    return {'games': {}, 'selected': None}
+
+
+def command(*args, cwd=ROOT):
+    subprocess.run([str(arg) for arg in args], cwd=cwd, check=True)
+
+
+def identify(source):
+    source = Path(source).expanduser().resolve()
+    for disc in (source / 'Wii', source):
+        if (disc / 'sys/main.dol').is_file() and (disc / 'sys/boot.bin').is_file() and (disc / 'files').is_dir():
+            break
+    else:
+        raise ValueError(f'{source}: expected an extracted game with sys/main.dol, sys/boot.bin and files/')
+    with (disc / 'sys/boot.bin').open('rb') as boot:
+        header = boot.read(32)
+    game_id = header[:6].decode('ascii', errors='replace')
+    if not re.fullmatch(r'[A-Za-z0-9]{6}', game_id):
+        raise ValueError(f'{disc}: invalid game ID in boot.bin')
+    platform = 'GameCube' if header[28:32] == bytes.fromhex('c2339f3d') else 'Wii'
+    project = disc.parent if disc.name == 'Wii' else source
+    name = re.sub(r'[^A-Za-z0-9_]+', '_', project.name).strip('_') or game_id
+    if name[0].isdigit():
+        name = 'Game_' + name
+    return game_id, {'source': str(project), 'disc': str(disc), 'name': name, 'platform': platform}
+
+
+def add(args):
+    game_id, game = identify(args.source)
+    data = registry()
+    previous = data['games'].get(game_id, {})
+    if previous.get('disc') == game['disc']:
+        game.update({key: previous[key] for key in ('package', 'output', 'icon') if key in previous})
+    data['games'][game_id] = game
+    data['selected'] = game_id
+    save(REGISTRY, data)
+    print(f"Added {game_id} ({game['name']}) from {game['disc']}")
+
+
+def selected(title):
+    data = registry()
+    if title is None:
+        title = data['selected']
+    if title not in data['games']:
+        matches = [key for key, game in data['games'].items() if game['name'].casefold() == str(title).casefold()]
+        if len(matches) != 1:
+            raise ValueError('Game not registered. Use ./wiirecomp add <extracted-game-directory>.')
+        title = matches[0]
+    return data, title, data['games'][title]
+
+
+def dependency_options():
+    options = []
+    for dependency in ('tomlplusplus', 'sdl2', 'glad', 'raylib', 'imgui', 'rlimgui', 'imgui_file_dialog', 'imgui_colortextedit', 'imgui_club'):
+        path = HOST_BUILD / '_deps' / (dependency + '-src')
+        if path.is_dir():
+            options.append(f'-DFETCHCONTENT_SOURCE_DIR_{dependency.upper()}={path}')
+    return options
+
+
+def host_tool(jobs):
+    command('cmake', '-S', ROOT, '-B', HOST_BUILD, '-DGLAD_REPRODUCIBLE=ON',
+            '-DFETCHCONTENT_UPDATES_DISCONNECTED=ON', *dependency_options())
+    command('cmake', '--build', HOST_BUILD, '--config', 'Release', '--target', 'nwiirecomp', '--parallel', jobs)
+    for path in (HOST_BUILD / 'nWiiRecomp/nwiirecomp', HOST_BUILD / 'nWiiRecomp/Release/nwiirecomp.exe', HOST_BUILD / 'nWiiRecomp/nwiirecomp.exe', HOST_BUILD / 'nWiiRecomp/Release/nwiirecomp'):
+        if path.is_file():
+            return path
+    raise ValueError('CMake did not produce nwiirecomp')
+
+
+def toml_value(value):
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, bool):
+        return str(value).lower()
+    if isinstance(value, int):
+        return str(value)
+    raise ValueError(f'Unsupported recompiler configuration value: {value!r}')
+
+
+def config_for(game_id, game, export):
+    source = Path(game['source'])
+    disc = Path(game['disc'])
+    runtime = source / 'config.toml'
+    recomp = source / 'recomp_config.toml'
+    settings = {}
+    for config in (runtime, recomp):
+        if config.is_file():
+            settings.update(tomllib.loads(config.read_text()))
+    values = {'project_name': game['name'], 'input_game_dir': str(disc), 'output_dir': str(export),
+              'runtime_source_dir': str(ROOT / 'nWiiRuntime'), 'split_output': True,
+              'instructions_per_file': 20000, 'ghidra_auto': False,
+              'sdk_sigdb': str(ROOT / 'third_party/dolphin-sigdb/totaldb.dsy')}
+    for key in ('split_output', 'instructions_per_file', 'ghidra_auto', 'ghidra_analysis_timeout_sec'):
+        if key in settings:
+            values[key] = settings[key]
+    for key in ('symbols_csv', 'ghidra_dir', 'ghidra_mcp_dir', 'sdk_sigdb'):
+        if key in settings:
+            values[key] = str((source / settings[key]).resolve()) if settings[key] else ''
+    lines = [f'{key} = {toml_value(value)}' for key, value in values.items()]
+    if settings.get('hle_hooks'):
+        lines.append('\n[hle_hooks]')
+        lines.extend(f'{toml_value(key)} = {toml_value(value)}' for key, value in settings['hle_hooks'].items())
+    for rel in settings.get('rel_aot', []):
+        lines.append('\n[[rel_aot]]')
+        lines.extend(f'{key} = {toml_value(value)}' for key, value in rel.items())
+    runtime_text = runtime.read_text() if runtime.is_file() else f'[system]\nplatform = "{game["platform"]}"\n\n[game]\nid = "{game_id}"\n'
+    return '\n'.join(lines) + '\n', runtime_text
+
+
+def fingerprint(tool, disc, config):
+    digest = hashlib.sha256(config.encode())
+    paths = [tool, disc / 'sys/main.dol', disc / 'sys/boot.bin']
+    for directory in ('src', 'include', 'third_party'):
+        paths.extend(path for path in (ROOT / 'nWiiRuntime' / directory).rglob('*') if path.is_file())
+    paths.append(ROOT / 'nWiiRuntime/CMakeLists.txt')
+    paths.append(ROOT / 'third_party/dolphin-sigdb/totaldb.dsy')
+    for path in sorted(paths):
+        if path.is_file():
+            digest.update(str(path).encode())
+            with path.open('rb') as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                    digest.update(chunk)
+    return digest.hexdigest()
+
+
+def generate(game_id, game, tool):
+    work = STATE / game_id
+    export = work / 'export'
+    config, runtime = config_for(game_id, game, export)
+    key = fingerprint(tool, Path(game['disc']), config)
+    stamp = work / 'fingerprint'
+    if not ((export / 'CMakeLists.txt').is_file() and stamp.is_file() and stamp.read_text() == key):
+        if export.exists():
+            shutil.rmtree(export)
+        work.mkdir(parents=True, exist_ok=True)
+        (work / 'recomp.toml').write_text(config)
+        command(tool, work / 'recomp.toml')
+        if not (export / 'CMakeLists.txt').is_file():
+            raise ValueError('Recompiler did not generate a CMake project')
+        stamp.write_text(key)
+    # Reuse the already generated GL loader where available, avoiding a registry download.
+    glad = HOST_BUILD / '_deps/glad-build'
+    vendor = export / 'nWiiRuntime/src/platform/glad'
+    if not (vendor / 'src/glad.c').is_file() and (glad / 'src/glad.c').is_file():
+        for folder in ('src', 'include'):
+            shutil.copytree(glad / folder, vendor / folder, dirs_exist_ok=True)
+    return export, runtime
+
+
+def mac_icon(source, resources):
+    if source.suffix.lower() == '.icns':
+        shutil.copy2(source, resources / 'Game.icns')
+    else:
+        with tempfile.TemporaryDirectory(dir=STATE) as temp:
+            square = Path(temp) / 'icon.png'
+            command('sips', '-s', 'format', 'png', '-z', 512, 512, source, '--out', square)
+            command('sips', '-s', 'format', 'icns', square, '--out', resources / 'Game.icns')
+
+
+def mac_dependencies(binary):
+    """Embed absolute non-system dylibs and rewrite their Mach-O load paths."""
+    frameworks = binary.parent.parent / 'Frameworks'
+    copied = {}
+    pending = [binary]
+    while pending:
+        executable = pending.pop()
+        listing = subprocess.check_output(['otool', '-L', str(executable)], text=True)
+        for line in listing.splitlines()[1:]:
+            dependency = line.strip().split(' (compatibility version', 1)[0]
+            if not dependency.startswith('/') or dependency.startswith(('/usr/lib/', '/System/Library/')):
+                continue
+            if dependency not in copied:
+                source = Path(dependency)
+                frameworks.mkdir(exist_ok=True)
+                target = frameworks / source.name
+                if target.exists():
+                    raise ValueError(f'Conflicting library names: {dependency}')
+                shutil.copy2(source, target)
+                target.chmod(target.stat().st_mode | 0o200)
+                copied[dependency] = target
+                command('install_name_tool', '-id', '@rpath/' + target.name, target)
+                pending.append(target)
+            target = copied[dependency]
+            command('install_name_tool', '-change', dependency,
+                    '@executable_path/../Frameworks/' + target.name, executable)
+    for library in copied.values():
+        command('codesign', '--force', '--sign', '-', library)
+
+
+def package_game(game_id, game, binary, runtime, output, icon):
+    name = game['name']
+    mac = sys.platform == 'darwin'
+    destination = output / (name + '.app' if mac else name)
+    output.mkdir(parents=True, exist_ok=True)
+    if destination.exists() and str(destination) != game.get('package'):
+        raise ValueError(f'Refusing to replace an existing package: {destination}')
+    with tempfile.TemporaryDirectory(prefix='.wiirecomp-', dir=output) as temp:
+        stage = Path(temp) / destination.name
+        resources = stage / 'Contents/Resources' if mac else stage
+        executables = stage / 'Contents/MacOS' if mac else stage
+        resources.mkdir(parents=True)
+        executables.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(binary, executables / binary.name)
+        shutil.copytree(game['disc'], resources / 'Wii', ignore=shutil.ignore_patterns('.DS_Store'))
+        project = Path(game['source'])
+        for folder in ('SOM', 'assets'):
+            if (project / folder).is_dir() and project != Path(game['disc']):
+                shutil.copytree(project / folder, resources / folder, ignore=shutil.ignore_patterns('.DS_Store'))
+        (resources / 'config.toml').write_text(runtime)
+        if mac:
+            info = {'CFBundleExecutable': binary.name, 'CFBundleIdentifier': f'org.wiirecomp.{game_id.lower()}',
+                    'CFBundleName': name, 'CFBundleDisplayName': name, 'CFBundlePackageType': 'APPL',
+                    'CFBundleVersion': '1', 'CFBundleShortVersionString': '1.0', 'NSHighResolutionCapable': True}
+            if icon:
+                mac_icon(icon, resources)
+                info['CFBundleIconFile'] = 'Game.icns'
+            with (stage / 'Contents/Info.plist').open('wb') as handle:
+                plistlib.dump(info, handle)
+            mac_dependencies(executables / binary.name)
+            command('codesign', '--force', '--sign', '-', stage)
+        elif icon:
+            shutil.copy2(icon, resources / ('icon' + icon.suffix.lower()))
+        backup = Path(temp) / 'previous'
+        if destination.exists():
+            destination.rename(backup)
+        try:
+            stage.rename(destination)
+        except OSError:
+            if backup.exists():
+                backup.rename(destination)
+            raise
+    return destination
+
+
+def build(args):
+    data, game_id, game = selected(args.title)
+    identify(game['disc'])
+    output = Path(args.output or game.get('output') or ROOT / 'out').expanduser().resolve()
+    icon_arg = args.icon or game.get('icon')
+    icon = Path(icon_arg).expanduser().resolve() if icon_arg else None
+    if icon and not icon.is_file():
+        raise ValueError(f'Icon does not exist: {icon}')
+    disc = Path(game['disc'])
+    if output == disc or disc in output.parents:
+        raise ValueError('Choose an output directory outside the original game data.')
+    jobs = min(os.cpu_count() or 2, 8)
+    tool = host_tool(jobs)
+    export, runtime = generate(game_id, game, tool)
+    build_dir = export / 'build'
+    options = ['-DCMAKE_BUILD_TYPE=Release', '-DGLAD_REPRODUCIBLE=ON', *dependency_options()]
+    if not (build_dir / 'CMakeCache.txt').exists() and shutil.which('ninja'):
+        options.extend(('-G', 'Ninja'))
+    command('cmake', '-S', export, '-B', build_dir, *options)
+    command('cmake', '--build', build_dir, '--config', 'Release', '--target', game['name'], '--parallel', jobs)
+    exe = game['name'] + ('.exe' if os.name == 'nt' else '')
+    binary = next((path for path in (build_dir / exe, build_dir / 'Release' / exe) if path.is_file()), None)
+    if binary is None:
+        raise ValueError(f'Build did not produce {exe}')
+    destination = package_game(game_id, game, binary, runtime, output, icon)
+    game.update(package=str(destination), output=str(output), icon=str(icon) if icon else None)
+    data['selected'] = game_id
+    save(REGISTRY, data)
+    print(f'Built {destination}')
+
+
+def run(args):
+    data, game_id, game = selected(args.title)
+    if not game.get('package') or not Path(game['package']).is_dir():
+        build(argparse.Namespace(title=game_id, output=None, icon=None))
+        _, _, game = selected(game_id)
+    package = Path(game['package'])
+    if sys.platform == 'darwin':
+        resources = package / 'Contents/Resources'
+        binary = package / 'Contents/MacOS' / game['name']
+    else:
+        resources = package
+        binary = package / (game['name'] + ('.exe' if os.name == 'nt' else ''))
+    if not binary.is_file():
+        raise ValueError(f'Missing executable: {binary}. Run ./wiirecomp build again.')
+    data = registry()
+    data['selected'] = game_id
+    save(REGISTRY, data)
+    os.chdir(resources)
+    os.execv(str(binary), [str(binary), str(resources / 'Wii'), str(resources / 'config.toml')])
+
+
+def main():
+    parser = argparse.ArgumentParser(prog='wiirecomp', description=__doc__)
+    commands = parser.add_subparsers(dest='command', required=True)
+    add_parser = commands.add_parser('add', help='register an extracted game')
+    add_parser.add_argument('source')
+    add_parser.set_defaults(handler=add)
+    build_parser = commands.add_parser('build', help='recompile and package a native game')
+    build_parser.add_argument('title', nargs='?', help='game ID or project name (defaults to last selected game)')
+    build_parser.add_argument('--icon', help='application icon image')
+    build_parser.add_argument('--output', help='destination directory (defaults to out/)')
+    build_parser.set_defaults(handler=build)
+    run_parser = commands.add_parser('run', help='launch the native game')
+    run_parser.add_argument('title', nargs='?', help='game ID or project name (defaults to last selected game)')
+    run_parser.set_defaults(handler=run)
+    args = parser.parse_args()
+    try:
+        args.handler(args)
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        print(f'wiirecomp: {error}', file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
