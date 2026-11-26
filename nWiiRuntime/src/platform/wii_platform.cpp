@@ -46,7 +46,7 @@ void WiiPlatform::ios_open(CPUContext& ctx) {
     return;
   }
 
-  int32_t fd = IOSKernel::get().open(ctx, path, 0);
+  int32_t fd = IOSKernel::get().open(ctx, path, ctx.gpr[4]);
 
   std::cout << "[HLE IOS] IOS_Open: path='" << path << "' -> fd=" << fd << std::endl;
   ctx.gpr[3] = fd;
@@ -69,7 +69,7 @@ void WiiPlatform::ios_open_async(CPUContext& ctx) {
     return;
   }
 
-  int32_t fd = IOSKernel::get().open(ctx, path, 0);
+  int32_t fd = IOSKernel::get().open(ctx, path, ctx.gpr[4]);
 
   std::cout << "[HLE IOS] IOS_OpenAsync: path='" << path << "' -> fd=" << fd 
             << " cb=0x" << std::hex << callback << std::dec << std::endl;

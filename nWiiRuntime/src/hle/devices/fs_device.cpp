@@ -124,6 +124,8 @@ class FSDevice : public IDevice {
         char title[32];
         std::snprintf(title, sizeof(title), "title/00010000/%08x", low);
         try {
+            // IOS clears its temporary NAND directory at boot.
+            fs::remove_all(candidate / "tmp");
             for (const char* dir : {"tmp", "import", "meta", "ticket", "title", "shared1", "shared2/sys", "shared2/test2", "sys", "title/00000001/00000002/data"})
                 fs::create_directories(candidate / dir);
             fs::create_directories(candidate / title / "data");
