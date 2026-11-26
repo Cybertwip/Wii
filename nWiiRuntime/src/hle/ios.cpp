@@ -690,11 +690,9 @@ bool g_ipc_reply_pending = false;
 int g_ipc_interrupt_delay = 0;
 
 
-static constexpr uint32_t CALLBACK_STACK_TOP_DEFAULT = 0x816F0000;
-
-static inline uint32_t get_callback_stack_top() {
+static inline uint32_t get_callback_stack_top(const CPUContext& ctx) {
     uint32_t v = Config::get().game_profile.callback_stack_top;
-    return v ? v : CALLBACK_STACK_TOP_DEFAULT;
+    return v ? v : ctx.bootstrap_stack_top;
 }
 
 void hle_drive_thread_queue(CPUContext& ctx) {
@@ -2102,7 +2100,7 @@ bool process_pending_callbacks(CPUContext &ctx) {
   ctx.gpr[3] = cb.arg1;
   ctx.gpr[4] = cb.arg2;
 
-  uint32_t cb_stack_top = get_callback_stack_top() - (ctx.callback_depth - 1) * 4096;
+  uint32_t cb_stack_top = get_callback_stack_top(ctx) - (ctx.callback_depth - 1) * 4096;
   ctx.gpr[1] = cb_stack_top - 16;
   ctx.mmu.write32(ctx.gpr[1], 0);
   ctx.mmu.write32(ctx.gpr[1] + 4, 0xFFFFFFFC);

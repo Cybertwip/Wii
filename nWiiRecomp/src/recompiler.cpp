@@ -1180,6 +1180,8 @@ void Recompiler::emit_instruction(std::ostream &out,
       out << "    ctx.gpr[" << rD << "] = ctx.srr1; // mfsrr1 r" << rD << "\n";
     } else if (spr == 22) {
       out << "    ctx.gpr[" << rD << "] = ctx.read_dec(); // mfdec r" << rD << "\n";
+    } else if (spr >= 272 && spr <= 275) {
+      out << "    ctx.gpr[" << rD << "] = ctx.sprg[" << (spr - 272) << "];\n";
     } else if (spr >= 912 && spr <= 919) {
       out << "    ctx.gpr[" << rD << "] = ctx.gqr[" << (spr - 912)
           << "]; // mfgqr" << (spr - 912) << " r" << rD << "\n";
@@ -1217,6 +1219,8 @@ void Recompiler::emit_instruction(std::ostream &out,
       out << "    ctx.srr1 = ctx.gpr[" << rS << "]; // mtsrr1 r" << rS << "\n";
     } else if (spr == 22) {
       out << "    ctx.write_dec(ctx.gpr[" << rS << "]); // mtdec r" << rS << "\n";
+    } else if (spr >= 272 && spr <= 275) {
+      out << "    ctx.sprg[" << (spr - 272) << "] = ctx.gpr[" << rS << "];\n";
     } else if (spr >= 912 && spr <= 919) {
       out << "    ctx.gqr[" << (spr - 912) << "] = ctx.gpr[" << rS
           << "]; // mtgqr" << (spr - 912) << " r" << rS << "\n";

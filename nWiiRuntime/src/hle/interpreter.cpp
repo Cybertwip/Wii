@@ -304,6 +304,7 @@ bool interpret_one(CPUContext& ctx) {
             else if (spr == 22) ctx.gpr[rD] = ctx.read_dec();
             else if (spr == 26) ctx.gpr[rD] = ctx.srr0;
             else if (spr == 27) ctx.gpr[rD] = ctx.srr1;
+            else if (spr >= 272 && spr <= 275) ctx.gpr[rD] = ctx.sprg[spr - 272];
             else if (spr >= 912 && spr <= 919) ctx.gpr[rD] = ctx.gqr[spr - 912];
             else ctx.gpr[rD] = 0;
             break;
@@ -316,6 +317,7 @@ bool interpret_one(CPUContext& ctx) {
             else if (spr == 22) ctx.write_dec(ctx.gpr[rD]);
             else if (spr == 26) ctx.srr0 = ctx.gpr[rD];
             else if (spr == 27) ctx.srr1 = ctx.gpr[rD];
+            else if (spr >= 272 && spr <= 275) ctx.sprg[spr - 272] = ctx.gpr[rD];
             else if (spr >= 912 && spr <= 919) ctx.gqr[spr - 912] = ctx.gpr[rD];
             break;
         }

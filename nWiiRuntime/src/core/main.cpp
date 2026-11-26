@@ -421,7 +421,13 @@ int main(int argc, char **argv) {
 
     ctx->mmu.write32(0x80000038, fst_addr); 
     ctx->mmu.write32(0x8000003C, fst_size); 
-    if (fst_addr < 0x81700000)
+    // Keep the runtime bootstrap/callback stack outside the guest heap,
+    // while allowing the SDK to use the rest of physical MEM1 below the FST.
+    constexpr uint32_t stack_reserve = 64 * 1024;
+    if (!is_gc && fst_addr > arena_lo && fst_addr - arena_lo > stack_reserve) {
+      ctx->bootstrap_stack_top = fst_addr;
+      arena_hi = (fst_addr - stack_reserve) & ~31u;
+    } else if (fst_addr < 0x81700000)
       arena_hi = fst_addr & ~31u;
     std::cout << "[Loader] FST loaded at 0x" << std::hex << fst_addr
               << " size 0x" << fst_size << std::dec << std::endl;
@@ -523,7 +529,7 @@ int main(int argc, char **argv) {
     poke_global(0x800000CC, pal ? 1u : 0u);
   }
 
-  ctx->gpr[1] = 0x816FFFF0;
+  ctx->gpr[1] = is_gc ? 0x816FFFF0 : ctx->bootstrap_stack_top - 16;
 
   // Low memory 0xF8/0xFC hold the BUS and CPU clocks (Dolphin writes
 

@@ -244,6 +244,7 @@ struct CPUContext {
 
   std::array<uint32_t, 8> gqr;
   std::array<uint32_t, 4> sprg; 
+  uint32_t bootstrap_stack_top = 0x816F0000;
 
   struct BackupState {
     std::array<uint32_t, 32> gpr;
@@ -349,7 +350,7 @@ struct CPUContext {
   }
 
   CPUContext() : gpr{0}, fpr{0.0}, ps1{0.0}, cr{}, pc(0), lr(0), ctr(0), xer(0), 
-                 msr(0), fpscr(0), srr0(0), srr1(0), gqr{0}, exception_pc(0), is_running(true), vblank_pending(false) {}
+                 msr(0), fpscr(0), srr0(0), srr1(0), gqr{0}, sprg{0}, exception_pc(0), is_running(true), vblank_pending(false) {}
 
   void queue_callback(uint32_t cb, uint32_t arg1, uint32_t arg2, bool is_irq = false) {
     std::lock_guard<std::mutex> lock(cb_mutex);
