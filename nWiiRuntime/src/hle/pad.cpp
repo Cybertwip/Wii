@@ -39,8 +39,14 @@ void WPADRead(CPUContext& ctx) {
 
     if (chan >= 0 && chan < 4 && data_ptr != 0) {
         WiimoteState state = InputManager::get().get_wiimote_state(chan);
-        ctx.mmu.write32(data_ptr + 0x00, state.err);
-        ctx.mmu.write32(data_ptr + 0x04, state.buttons);
+        ctx.mmu.write16(data_ptr, (uint16_t)state.buttons);
+        ctx.mmu.write16(data_ptr + 2, (uint16_t)(int16_t)(state.accel_x * 256.0f));
+        ctx.mmu.write16(data_ptr + 4, (uint16_t)(int16_t)(state.accel_y * 256.0f));
+        ctx.mmu.write16(data_ptr + 6, (uint16_t)(int16_t)(state.accel_z * 512.0f));
+        for (int offset = 8; offset < 40; offset += 4)
+            ctx.mmu.write32(data_ptr + offset, 0);
+        ctx.mmu.write8(data_ptr + 40, state.nunchuk_connected ? 1 : 0);
+        ctx.mmu.write8(data_ptr + 41, (uint8_t)state.err);
     }
     ctx.gpr[3] = 0; 
 }
@@ -71,16 +77,20 @@ void KPADRead(CPUContext& ctx) {
             ctx.mmu.write32(data_array_ptr + 0x04, trigger);
             ctx.mmu.write32(data_array_ptr + 0x08, release);
             
-            ctx.mmu.write32(data_array_ptr + 0x0C, 0);
-            ctx.mmu.write32(data_array_ptr + 0x10, 0);
-            ctx.mmu.write32(data_array_ptr + 0x14, 0);
-            
-            for (int b = 0x18; b < 0x48; b += 4)
-                ctx.mmu.write32(data_array_ptr + b, 0);
-            
-            ctx.mmu.write32(data_array_ptr + 0x48, 0);
-            
-            ctx.mmu.write32(data_array_ptr + 0x4C, 0);
+            for (int offset = 0x0C; offset < 0x7C; offset += 4)
+                ctx.mmu.write32(data_array_ptr + offset, 0);
+            ctx.mmu.write_f32(data_array_ptr + 0x0C, state.accel_x);
+            ctx.mmu.write_f32(data_array_ptr + 0x10, state.accel_y);
+            ctx.mmu.write_f32(data_array_ptr + 0x14, state.accel_z);
+            ctx.mmu.write8(data_array_ptr + 0x5C, state.nunchuk_connected ? 1 : 0);
+            ctx.mmu.write8(data_array_ptr + 0x5D, (uint8_t)state.err);
+            ctx.mmu.write8(data_array_ptr + 0x5F, state.nunchuk_connected ? 5 : 2);
+            if (state.nunchuk_connected) {
+                ctx.mmu.write_f32(data_array_ptr + 0x60, state.nunchuk_x);
+                ctx.mmu.write_f32(data_array_ptr + 0x64, state.nunchuk_y);
+                ctx.mmu.write_f32(data_array_ptr + 0x70, 1.0f);
+                ctx.mmu.write_f32(data_array_ptr + 0x74, 1.0f);
+            }
 
             read_count = 1;
         }

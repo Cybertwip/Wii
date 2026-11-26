@@ -3,6 +3,7 @@
 #include "../gip/GipGamepad.h"
 
 #include <atomic>
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -146,6 +147,7 @@ std::unique_ptr<USBHub>& hub() {
 
 bool gip_live = false;
 State gip_state{};
+float gip_ir_x = 0.5f, gip_ir_y = 0.5f;
 
 }  // namespace
 
@@ -189,14 +191,12 @@ void GipWiimoteSource::update(GameCubePadState pads[4], WiimoteState motes[4]) {
 
     if (gip_live) {
         motes[0].buttons |= wiimote_buttons(gip_state);
-        float rx = nwii::gip::stickValue(gip_state.rightX);
-        float ry = -nwii::gip::stickValue(gip_state.rightY); // screen Y grows down
-        motes[0].ir_x += rx * 0.04f;
-        motes[0].ir_y += ry * 0.04f;
-        if (motes[0].ir_x < 0.0f) motes[0].ir_x = 0.0f;
-        if (motes[0].ir_x > 1.0f) motes[0].ir_x = 1.0f;
-        if (motes[0].ir_y < 0.0f) motes[0].ir_y = 0.0f;
-        if (motes[0].ir_y > 1.0f) motes[0].ir_y = 1.0f;
+        float rx = normalized_stick(gip_state.rightX);
+        float ry = -normalized_stick(gip_state.rightY); // screen Y grows down
+        gip_ir_x = std::clamp(gip_ir_x + rx * 0.04f, 0.0f, 1.0f);
+        gip_ir_y = std::clamp(gip_ir_y + ry * 0.04f, 0.0f, 1.0f);
+        motes[0].ir_x = gip_ir_x;
+        motes[0].ir_y = gip_ir_y;
         set_nunchuk(motes[0], gip_state.leftX, gip_state.leftY,
             (gip_state.buttons & (Button::LeftBumper | Button::RightBumper)) != 0,
             gip_state.leftTrigger > 512 || gip_state.rightTrigger > 512);

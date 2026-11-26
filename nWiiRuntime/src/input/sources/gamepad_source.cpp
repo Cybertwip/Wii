@@ -2,30 +2,49 @@
 #include "runtime/config.h"
 #include <SDL.h>
 #include <cmath>
+#include <algorithm>
 
 namespace nwii::runtime::input {
+
+GamepadSource::~GamepadSource() {
+    if (SDL_WasInit(SDL_INIT_GAMECONTROLLER)) {
+        for (auto* controller : controllers) SDL_GameControllerClose(controller);
+    }
+}
 
 void GamepadSource::update(GameCubePadState pads[4], WiimoteState motes[4]) {
     auto& cfg = nwii::runtime::Config::get();
     int mode = cfg.input_mode;
     bool want_pointer = (mode == 1 || mode == 3 || mode == 4);
 
-    int i = 0;
-    for (int device = 0; device < SDL_NumJoysticks() && i < 4; ++device) {
-        if (!SDL_IsGameController(device))
-            continue;
-            
-        SDL_GameController* controller = SDL_GameControllerOpen(device);
-        if (!controller) continue;
-
+    if (!SDL_WasInit(SDL_INIT_GAMECONTROLLER)) return;
+    controllers.erase(std::remove_if(controllers.begin(), controllers.end(), [](auto* controller) {
+        if (SDL_GameControllerGetAttached(controller)) return false;
+        SDL_GameControllerClose(controller);
+        return true;
+    }), controllers.end());
+    for (int device = 0; device < SDL_NumJoysticks() && controllers.size() < 4; ++device) {
+        if (!SDL_IsGameController(device)) continue;
+        const auto id = SDL_JoystickGetDeviceInstanceID(device);
+        if (std::any_of(controllers.begin(), controllers.end(), [id](auto* controller) {
+            return SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(controller)) == id;
+        })) continue;
+        if (auto* controller = SDL_GameControllerOpen(device)) {
+            controllers.push_back(controller);
+            if (SDL_GameControllerHasSensor(controller, SDL_SENSOR_GYRO))
+                SDL_GameControllerSetSensorEnabled(controller, SDL_SENSOR_GYRO, SDL_TRUE);
+        }
+    }
+    SDL_GameControllerUpdate();
+    for (size_t i = 0; i < controllers.size(); ++i) {
+        auto* controller = controllers[i];
         pads[i].err = 0;  
         motes[i].err = 0; 
 
         if (want_pointer) {
             float dx = 0.0f, dy = 0.0f;
             
-            if (SDL_GameControllerHasSensor(controller, SDL_SENSOR_GYRO)) {
-                SDL_GameControllerSetSensorEnabled(controller, SDL_SENSOR_GYRO, SDL_TRUE);
+            if (mode != 1 && SDL_GameControllerHasSensor(controller, SDL_SENSOR_GYRO)) {
                 float data[3];
                 if (SDL_GameControllerGetSensorData(controller, SDL_SENSOR_GYRO, data, 3) == 0) {
                     dx = data[0] * cfg.gyro_sensitivity;
@@ -59,7 +78,7 @@ void GamepadSource::update(GameCubePadState pads[4], WiimoteState motes[4]) {
         if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_Y)) motes[i].buttons |= 0x0100; // 2 
         if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_START)) motes[i].buttons |= 0x0010; 
         if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_BACK)) motes[i].buttons |= 0x1000;  
-        if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_GUIDE)) motes[i].buttons |= WiiHome; 
+        if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_GUIDE)) motes[i].buttons |= WiiHome;
         if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_UP)) motes[i].buttons |= 0x0008;
         if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_DOWN)) motes[i].buttons |= 0x0004;
         if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_LEFT)) motes[i].buttons |= 0x0001;
@@ -97,8 +116,6 @@ void GamepadSource::update(GameCubePadState pads[4], WiimoteState motes[4]) {
         
         pads[i].trigger_l = (uint8_t)((SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_TRIGGERLEFT) / 32767.0f) * 255.0f);
         pads[i].trigger_r = (uint8_t)((SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) / 32767.0f) * 255.0f);
-        SDL_GameControllerClose(controller);
-        ++i;
     }
 }
 

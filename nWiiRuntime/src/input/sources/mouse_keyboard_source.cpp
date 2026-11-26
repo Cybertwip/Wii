@@ -24,7 +24,7 @@ void MouseKeyboardSource::update(GameCubePadState pads[4], WiimoteState motes[4]
     if (mouse_state & SDL_BUTTON(SDL_BUTTON_LEFT)) motes[0].buttons |= 0x0800; 
     if (mouse_state & SDL_BUTTON(SDL_BUTTON_RIGHT)) motes[0].buttons |= 0x0400; 
     if (keys[SDL_SCANCODE_RETURN]) motes[0].buttons |= 0x0010; 
-    if (keys[SDL_SCANCODE_BACKSPACE]) motes[0].buttons |= 0x1000; 
+    if (keys[SDL_SCANCODE_BACKSPACE]) motes[0].buttons |= 0x1000;
     if (keys[SDL_SCANCODE_UP]) motes[0].buttons |= 0x0008; 
     if (keys[SDL_SCANCODE_DOWN]) motes[0].buttons |= 0x0004; 
     if (keys[SDL_SCANCODE_LEFT]) motes[0].buttons |= 0x0001; 
