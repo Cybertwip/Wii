@@ -1409,9 +1409,6 @@ static void debug_loader_snapshot(CPUContext &ctx) {
 bool process_pending_callbacks(CPUContext &ctx) {
   debug_loader_snapshot(ctx);
   input::gip_satisfy_bta_device_up(ctx);
-  repair_ready_runqueue(ctx);
-  clamp_extsh_content_scan(ctx);
-  yield_to_ready_thread(ctx);
 
   if (std::getenv("NWII_SAMPLE")) {
       static uint32_t last_ee = 0, edges = 0;
@@ -1503,7 +1500,6 @@ bool process_pending_callbacks(CPUContext &ctx) {
       
 
       
-      ctx.dec_written_tb = ctx.read_timebase();
       static uint32_t restore_count = 0;
       restore_count++;
       if (ctx.pc == 0 || (restore_count % 64) == 1) {
