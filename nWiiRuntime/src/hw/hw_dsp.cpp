@@ -84,7 +84,7 @@ size_t dsp_audio_pull(int16_t* out, size_t frames) {
     std::lock_guard<std::mutex> lock(adma_mutex);
     size_t have = adma_ring.size() / 2;
     size_t n = have < frames ? have : frames;
-    std::memcpy(out, adma_ring.data(), n * 2 * sizeof(int16_t));
+    if (n) std::memcpy(out, adma_ring.data(), n * 2 * sizeof(int16_t));
     adma_ring.erase(adma_ring.begin(), adma_ring.begin() + n * 2);
     if (n < frames)
         std::memset(out + n * 2, 0, (frames - n) * 2 * sizeof(int16_t));
@@ -97,8 +97,15 @@ static void adma_event_cb(CPUContext& ctx, uint64_t late) {
     uint32_t blocks = adma_control & 0x7FFF;
     uint32_t bytes = blocks * 32;
     if (g_mmu && bytes > 0) {
+        static unsigned dma_count = 0;
+        if (std::getenv("NWII_DSPTRACE") && (++dma_count <= 10 || dma_count % 1000 == 0)) {
+            unsigned nonzero = 0;
+            for (uint32_t i = 0; i < bytes; i += 2)
+                nonzero += g_mmu->read16((adma_addr | 0x80000000u) + i) != 0;
+            std::cout << "[DSP] Audio DMA addr=0x" << std::hex << adma_addr
+                      << std::dec << " bytes=" << bytes << " nonzero=" << nonzero << std::endl;
+        }
         std::lock_guard<std::mutex> lock(adma_mutex);
-        
         if (adma_ring.size() < 32000 * 2) {
             uint32_t va = adma_addr | 0x80000000;
             for (uint32_t i = 0; i + 3 < bytes; i += 4) {
@@ -206,6 +213,13 @@ void register_dsp(MMIODispatcher& dispatcher) {{
                             });
                     };
                     if (s_ax_state == 1) {
+                        static unsigned lists = 0;
+                        if (std::getenv("NWII_DSPTRACE") && (++lists <= 8 || lists % 1000 == 0)) {
+                            std::cout << "[DSP] AX command list 0x" << std::hex << mail;
+                            for (unsigned i = 0; i < 24; ++i)
+                                std::cout << " " << g_mmu->read16((mail | 0x80000000u) + i * 2);
+                            std::cout << std::dec << std::endl;
+                        }
                         
                         reply(0x0002); 
                         s_ax_state = 2;
