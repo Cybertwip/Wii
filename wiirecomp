@@ -62,7 +62,7 @@ def add(args):
     data = registry()
     previous = data['games'].get(game_id, {})
     if previous.get('disc') == game['disc']:
-        game.update({key: previous[key] for key in ('package', 'output', 'icon') if key in previous})
+        game.update({key: previous[key] for key in ('package', 'output', 'icon', 'resolution') if key in previous})
     data['games'][game_id] = game
     data['selected'] = game_id
     save(REGISTRY, data)
@@ -265,6 +265,24 @@ def package_game(game_id, game, binary, runtime, output, icon):
     return destination
 
 
+def parse_resolution(value):
+    if not re.fullmatch(r'[1-8]x', value.lower()):
+        raise argparse.ArgumentTypeError('resolution must be 1x through 8x')
+    return int(value[0])
+
+
+def runtime_resolution(runtime, scale):
+    # Preserve the source project's configuration and set only the packaged copy.
+    section = re.search(r'^\[graphics\][ \t]*(?:#.*)?$', runtime, re.MULTILINE)
+    if not section:
+        return runtime.rstrip() + f'\n\n[graphics]\nresolution = {scale}\n'
+    start = section.end()
+    following = re.search(r'^\[', runtime[start:], re.MULTILINE)
+    end = start + following.start() if following else len(runtime)
+    body = re.sub(r'^resolution\s*=.*(?:\n|$)', '', runtime[start:end], flags=re.MULTILINE)
+    return runtime[:start] + f'\nresolution = {scale}' + body + runtime[end:]
+
+
 def build(args):
     data, game_id, game = selected(args.title)
     identify(game['disc'])
@@ -289,8 +307,10 @@ def build(args):
     binary = next((path for path in (build_dir / exe, build_dir / 'Release' / exe) if path.is_file()), None)
     if binary is None:
         raise ValueError(f'Build did not produce {exe}')
+    scale = args.resolution if args.resolution is not None else 1
+    runtime = runtime_resolution(runtime, scale)
     destination = package_game(game_id, game, binary, runtime, output, icon)
-    game.update(package=str(destination), output=str(output), icon=str(icon) if icon else None)
+    game.update(package=str(destination), output=str(output), icon=str(icon) if icon else None, resolution=scale)
     data['selected'] = game_id
     save(REGISTRY, data)
     print(f'Built {destination}')
@@ -299,7 +319,7 @@ def build(args):
 def run(args):
     data, game_id, game = selected(args.title)
     if not game.get('package') or not Path(game['package']).is_dir():
-        build(argparse.Namespace(title=game_id, output=None, icon=None))
+        build(argparse.Namespace(title=game_id, output=None, icon=None, resolution=args.resolution))
         _, _, game = selected(game_id)
     package = Path(game['package'])
     if sys.platform == 'darwin':
@@ -314,6 +334,8 @@ def run(args):
     data['selected'] = game_id
     save(REGISTRY, data)
     os.chdir(resources)
+    if args.resolution is not None:
+        os.environ['NWII_RESOLUTION'] = str(args.resolution)
     os.execv(str(binary), [str(binary), str(resources / 'Wii'), str(resources / 'config.toml')])
 
 
@@ -327,9 +349,11 @@ def main():
     build_parser.add_argument('title', nargs='?', help='game ID or project name (defaults to last selected game)')
     build_parser.add_argument('--icon', help='application icon image')
     build_parser.add_argument('--output', help='destination directory (defaults to out/)')
+    build_parser.add_argument('--resolution', type=parse_resolution, metavar='Nx', help='internal rendering scale (1x–8x, default 1x)')
     build_parser.set_defaults(handler=build)
     run_parser = commands.add_parser('run', help='launch the native game')
     run_parser.add_argument('title', nargs='?', help='game ID or project name (defaults to last selected game)')
+    run_parser.add_argument('--resolution', type=parse_resolution, metavar='Nx', help='override the packaged rendering scale for this run')
     run_parser.set_defaults(handler=run)
     args = parser.parse_args()
     try:

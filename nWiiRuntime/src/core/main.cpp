@@ -40,6 +40,10 @@ CPUContext *g_ctx_ptr = nullptr;
 
 bool init(const char *config_path = "config.toml") {
   Config::get().load(config_path);
+  if (const char* scale = std::getenv("NWII_RESOLUTION")) {
+    if (scale[0] >= '1' && scale[0] <= '8' && scale[1] == '\0')
+      Config::get().resolution_scale = scale[0] - '0';
+  }
   hw::register_all_hw(MMIODispatcher::get());
   return true;
 }
@@ -209,6 +213,10 @@ int main(int argc, char **argv) {
   SDL_Window* window = nullptr;
   SDL_GLContext gl_ctx = nullptr;
   SDL_AudioDeviceID audio_dev = 0;
+  const int scale = nwii::runtime::Config::get().resolution_scale;
+  const int efb_width = 640 * scale, efb_height = 480 * scale;
+  std::cout << "[Graphics] Internal resolution " << scale << "x ("
+            << efb_width << "x" << efb_height << ")" << std::endl;
   GLuint efb_fbo = 0, efb_tex = 0;
   GLuint xfb_tex = 0;
 
@@ -285,11 +293,19 @@ int main(int argc, char **argv) {
       SDL_GL_SetSwapInterval(1);
     }
     
+    GLint max_texture = 0, max_renderbuffer = 0;
+    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_texture);
+    glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &max_renderbuffer);
+    if (efb_width > max_texture || efb_height > max_texture ||
+        efb_width > max_renderbuffer || efb_height > max_renderbuffer) {
+      std::cerr << "Requested internal resolution exceeds GPU limits.\n";
+      return 1;
+    }
     glGenFramebuffers(1, &efb_fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, efb_fbo);
     glGenTextures(1, &efb_tex);
     glBindTexture(GL_TEXTURE_2D, efb_tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 640, 480, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, efb_width, efb_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, efb_tex, 0);
@@ -299,7 +315,7 @@ int main(int argc, char **argv) {
       GLuint efb_depth_rbo = 0;
       glGenRenderbuffers(1, &efb_depth_rbo);
       glBindRenderbuffer(GL_RENDERBUFFER, efb_depth_rbo);
-      glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, 640, 480);
+      glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, efb_width, efb_height);
       glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
                                 GL_RENDERBUFFER, efb_depth_rbo);
     }
@@ -309,6 +325,7 @@ int main(int argc, char **argv) {
       std::cout << "[GL] EFB FBO status: 0x" << std::hex << st << std::dec
                 << (st == GL_FRAMEBUFFER_COMPLETE ? " (complete)" : " (INCOMPLETE!)")
                 << std::endl;
+      if (st != GL_FRAMEBUFFER_COMPLETE) return 1;
     }
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
@@ -321,9 +338,19 @@ int main(int argc, char **argv) {
     want.freq = 32000;
     want.format = AUDIO_S16SYS;
     want.channels = 2;
-    want.samples = 1024;
+    want.samples = 512;
+    want.callback = [](void*, Uint8* stream, int len) {
+      nwii::runtime::hw::dsp_audio_pull(reinterpret_cast<int16_t*>(stream),
+                                       size_t(len) / (2 * sizeof(int16_t)));
+    };
     audio_dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
-    if (audio_dev > 0) SDL_PauseAudioDevice(audio_dev, 0);
+    if (audio_dev > 0) {
+      std::cout << "[Audio] " << SDL_GetCurrentAudioDriver() << " "
+                << have.freq << " Hz stereo" << std::endl;
+      SDL_PauseAudioDevice(audio_dev, 0);
+    } else {
+      std::cerr << "[Audio] SDL_OpenAudioDevice: " << SDL_GetError() << std::endl;
+    }
   }
 
   auto ctx = std::make_unique<nwii::runtime::CPUContext>();
@@ -666,7 +693,7 @@ int main(int argc, char **argv) {
 
       if (!headless) {
         glBindFramebuffer(GL_FRAMEBUFFER, efb_fbo);
-        glViewport(0, 0, 640, 480);
+        glViewport(0, 0, efb_width, efb_height);
       }
 
       extern void GX_GetXfb(uint32_t*, unsigned*, unsigned*, unsigned*);
@@ -722,9 +749,9 @@ int main(int argc, char **argv) {
           extern uint64_t g_stat_frames, g_stat_draws;
           extern uint64_t g_stat_parse_us, g_stat_render_us;
           extern uint64_t nwii_stat_hash0(), nwii_stat_shaders();
-          std::vector<unsigned char> p(640 * 480 * 4);
+          std::vector<unsigned char> p(size_t(efb_width) * efb_height * 4);
           glBindFramebuffer(GL_READ_FRAMEBUFFER, efb_fbo);
-          glReadPixels(0, 0, 640, 480, GL_RGBA, GL_UNSIGNED_BYTE, p.data());
+          glReadPixels(0, 0, efb_width, efb_height, GL_RGBA, GL_UNSIGNED_BYTE, p.data());
           glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
           size_t nonblack = 0;
           for (size_t i = 0; i < p.size(); i += 4)
@@ -734,7 +761,7 @@ int main(int argc, char **argv) {
                     << g_stat_frames << " draws=" << g_stat_draws
                     << " parse_ms=" << g_stat_parse_us / 1000
                     << " render_ms=" << g_stat_render_us / 1000
-                    << " efb_nonblack=" << nonblack << "/307200"
+                    << " efb_nonblack=" << nonblack << "/" << efb_width * efb_height
                     << " shaders=" << nwii_stat_shaders() << " hash0=0x"
                     << std::hex << nwii_stat_hash0();
           g_stat_parse_us = 0;
@@ -786,21 +813,21 @@ int main(int argc, char **argv) {
 
         glBindFramebuffer(GL_READ_FRAMEBUFFER, efb_fbo);
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-        glBlitFramebuffer(0, 0, 640, 480, 0, 0, draw_w, draw_h,
+        glBlitFramebuffer(0, 0, efb_width, efb_height, 0, 0, draw_w, draw_h,
                           GL_COLOR_BUFFER_BIT, GL_LINEAR);
 
         if (const char *shot_pfx = std::getenv("NWII_SCREENSHOT")) {
           static int shot_frame = 0;
           if ((++shot_frame % 300) == 0) {
-            std::vector<unsigned char> px(640 * 480 * 4);
+            std::vector<unsigned char> px(size_t(efb_width) * efb_height * 4);
             glBindFramebuffer(GL_READ_FRAMEBUFFER, efb_fbo);
-            glReadPixels(0, 0, 640, 480, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+            glReadPixels(0, 0, efb_width, efb_height, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
             std::vector<unsigned char> flip(px.size());
-            for (int y = 0; y < 480; ++y)
-              std::memcpy(&flip[(size_t)y * 640 * 4],
-                          &px[(size_t)(479 - y) * 640 * 4], 640 * 4);
+            for (int y = 0; y < efb_height; ++y)
+              std::memcpy(&flip[(size_t)y * efb_width * 4],
+                          &px[(size_t)(efb_height - 1 - y) * efb_width * 4], efb_width * 4);
             SDL_Surface *s = SDL_CreateRGBSurfaceFrom(
-                flip.data(), 640, 480, 32, 640 * 4, 0x000000FF, 0x0000FF00,
+                flip.data(), efb_width, efb_height, 32, efb_width * 4, 0x000000FF, 0x0000FF00,
                 0x00FF0000, 0xFF000000);
             if (s) {
               std::string p = std::string(shot_pfx) + "_" +
@@ -815,14 +842,6 @@ int main(int argc, char **argv) {
         SDL_GL_SwapWindow(window);
       }
 
-      if (audio_dev > 0) {
-        if (SDL_GetQueuedAudioSize(audio_dev) < 1024 * 4 * 2) {
-          static int16_t abuf[1024 * 2];
-          nwii::runtime::hw::dsp_audio_pull(abuf, 1024);
-          SDL_QueueAudio(audio_dev, abuf, 1024 * 4);
-        }
-      }
-      
       ctx->vblank_pending = true;
       if (headless) std::this_thread::sleep_for(std::chrono::milliseconds(16));
     }

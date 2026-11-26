@@ -148,7 +148,7 @@ vec4 dolphin_chan(int chan, vec3 pos, vec3 nrm, vec4 vcol) {
     
     for (int i = 0; i < numTevs; ++i) {
         const auto& stage = state.tevStages[i];
-        fs << "    // TEV Stage " << i << "\n";
+        fs << "    { // TEV Stage " << i << "\n";
 
         if (stage.colorChan == 0) fs << "    rasColor = vColor0;\n";
         else if (stage.colorChan == 1) fs << "    rasColor = vColor1;\n";
@@ -292,7 +292,7 @@ vec4 dolphin_chan(int chan, vec3 pos, vec3 nrm, vec4 vcol) {
 
         if (stage.alphaClamp == 1) fs << "    aOut = clamp(aOut, 0.0, 1.0);\n";
 
-        fs << "    tevReg[" << (int)stage.alphaRegId << "].a = aOut;\n";
+        fs << "    tevReg[" << (int)stage.alphaRegId << "].a = aOut;\n    }\n";
     }
     
     fs << "    FragColor = tevReg[0];\n";

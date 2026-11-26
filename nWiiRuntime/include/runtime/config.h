@@ -50,6 +50,7 @@ public:
     Platform platform = Platform::Wii;
     Backend backend = Backend::OpenGL;
     bool enable_vsync = true;
+    int resolution_scale = 1;
     int window_width = 640;
     int window_height = 480;
     std::string game_dir;

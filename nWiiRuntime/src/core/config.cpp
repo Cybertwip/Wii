@@ -29,6 +29,9 @@ void Config::load(const std::string& filepath) {
             }
         }
 
+        auto scale = tbl["graphics"]["resolution"].value<int>();
+        if (scale && *scale >= 1 && *scale <= 8) resolution_scale = *scale;
+
         auto vsync = tbl["graphics"]["vsync"].value<bool>();
         if (vsync) enable_vsync = *vsync;
 
