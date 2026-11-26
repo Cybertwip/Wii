@@ -39,7 +39,7 @@ public:
         
         if (req.ioctl_cmd == 0x1D) {
             if (req.arg_cnt_in != 1 || req.arg_cnt_out != 1 || req.ioctlv_vecs.size() != 2 ||
-                req.ioctlv_vecs[0].len < 8 || req.ioctlv_vecs[1].len < 32) return IPC_EINVAL;
+                req.ioctlv_vecs[0].len < 8 || req.ioctlv_vecs[1].len < 30) return IPC_EINVAL;
             const auto& in = req.ioctlv_vecs[0];
             const auto& out = req.ioctlv_vecs[1];
             char path[64];
