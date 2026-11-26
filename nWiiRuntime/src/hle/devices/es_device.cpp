@@ -2,6 +2,7 @@
 #include "runtime/ios_kernel.h"
 #include "runtime/config.h"
 #include <iostream>
+#include <cstdio>
 
 namespace nwii::runtime::devices {
 
@@ -36,7 +37,18 @@ public:
         std::cout << "[ES] Output vectors zeroed.\n";
 
         
-        if (req.ioctl_cmd == 0x20) { 
+        if (req.ioctl_cmd == 0x1D) {
+            if (req.arg_cnt_in != 1 || req.arg_cnt_out != 1 || req.ioctlv_vecs.size() != 2 ||
+                req.ioctlv_vecs[0].len < 8 || req.ioctlv_vecs[1].len < 32) return IPC_EINVAL;
+            const auto& in = req.ioctlv_vecs[0];
+            const auto& out = req.ioctlv_vecs[1];
+            char path[64];
+            const int len = std::snprintf(path, sizeof(path), "/title/%08x/%08x/data",
+                ctx.mmu.read32(in.addr), ctx.mmu.read32(in.addr + 4));
+            if (!out.addr || len < 0 || static_cast<uint32_t>(len) >= out.len) return IPC_EINVAL;
+            for (int i = 0; i <= len; ++i) ctx.mmu.write8(out.addr + i, path[i]);
+            std::cout << "[ES] Data directory: " << path << '\n';
+        } else if (req.ioctl_cmd == 0x20) { 
             if (req.arg_cnt_out >= 1) {
                 uint32_t view_addr = req.ioctlv_vecs[req.arg_cnt_in].addr;
                 uint32_t view_len = req.ioctlv_vecs[req.arg_cnt_in].len;

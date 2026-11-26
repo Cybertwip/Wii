@@ -85,7 +85,9 @@ int32_t IOSKernel::seek(CPUContext& ctx, uint32_t fd, int32_t offset, int32_t wh
 int32_t IOSKernel::ioctl(CPUContext& ctx, const IpcRequest& req) {
     FdEntry* e = get_entry(req.fd);
     if (!e) return IPC_EINVAL;
-    return e->device->ioctl(ctx, req);
+    IpcRequest device_req = req;
+    device_req.fd = e->internal_fd;
+    return e->device->ioctl(ctx, device_req);
 }
 
 int32_t IOSKernel::ioctlv(CPUContext& ctx, const IpcRequest& req) {

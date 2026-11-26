@@ -234,6 +234,12 @@ void WiiPlatform::ios_ioctlv(CPUContext& ctx) {
   IpcRequest req{};
   req.fd = fd;
   req.ioctl_cmd = cmd;
+  req.arg_cnt_in = ctx.gpr[5];
+  req.arg_cnt_out = ctx.gpr[6];
+  const uint32_t arg_array = ctx.gpr[7];
+  for (uint32_t i = 0; i < req.arg_cnt_in + req.arg_cnt_out; ++i) {
+      req.ioctlv_vecs.push_back({ctx.mmu.read32(arg_array + i * 8), ctx.mmu.read32(arg_array + i * 8 + 4)});
+  }
   ctx.gpr[3] = IOSKernel::get().ioctlv(ctx, req);
   ctx.pc = ctx.lr;
 }
