@@ -45,6 +45,9 @@ void InputManager::update() {
         gc_pads[i].err = -1; 
 
         wii_motes[i].buttons = 0;
+        wii_motes[i].nunchuk_connected = false;
+        wii_motes[i].nunchuk_x = 0.0f;
+        wii_motes[i].nunchuk_y = 0.0f;
         wii_motes[i].err = -1; 
     }
 

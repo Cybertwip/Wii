@@ -8,13 +8,14 @@ namespace nwii::runtime::input {
 void GamepadSource::update(GameCubePadState pads[4], WiimoteState motes[4]) {
     auto& cfg = nwii::runtime::Config::get();
     int mode = cfg.input_mode;
-    bool want_pointer = (mode == 3 || mode == 4);
+    bool want_pointer = (mode == 1 || mode == 3 || mode == 4);
 
-    for (int i = 0; i < 4; ++i) {
-        if (!SDL_IsGameController(i))
+    int i = 0;
+    for (int device = 0; device < SDL_NumJoysticks() && i < 4; ++device) {
+        if (!SDL_IsGameController(device))
             continue;
             
-        SDL_GameController* controller = SDL_GameControllerOpen(i);
+        SDL_GameController* controller = SDL_GameControllerOpen(device);
         if (!controller) continue;
 
         pads[i].err = 0;  
@@ -58,7 +59,7 @@ void GamepadSource::update(GameCubePadState pads[4], WiimoteState motes[4]) {
         if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_Y)) motes[i].buttons |= 0x0100; // 2 
         if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_START)) motes[i].buttons |= 0x0010; 
         if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_BACK)) motes[i].buttons |= 0x1000;  
-        if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_GUIDE)) motes[i].buttons |= 0x0080; 
+        if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_GUIDE)) motes[i].buttons |= WiiHome; 
         if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_UP)) motes[i].buttons |= 0x0008;
         if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_DOWN)) motes[i].buttons |= 0x0004;
         if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_LEFT)) motes[i].buttons |= 0x0001;
@@ -79,10 +80,15 @@ void GamepadSource::update(GameCubePadState pads[4], WiimoteState motes[4]) {
 
         int lx = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_LEFTX);
         int ly = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_LEFTY);
+        set_nunchuk(motes[i], lx, -ly,
+            SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_LEFTSHOULDER) ||
+            SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER),
+            SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 16384 ||
+            SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 16384);
         if (std::abs(lx) > 8000) pads[i].stick_x = (int8_t)((lx / 32767.0f) * 127.0f);
         if (std::abs(ly) > 8000) pads[i].stick_y = (int8_t)((-ly / 32767.0f) * 127.0f); 
         
-        if (!want_pointer) {
+        if (mode != 3 && mode != 4) {
             int rx = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_RIGHTX);
             int ry = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_RIGHTY);
             if (std::abs(rx) > 8000) pads[i].substick_x = (int8_t)((rx / 32767.0f) * 127.0f);
@@ -91,6 +97,8 @@ void GamepadSource::update(GameCubePadState pads[4], WiimoteState motes[4]) {
         
         pads[i].trigger_l = (uint8_t)((SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_TRIGGERLEFT) / 32767.0f) * 255.0f);
         pads[i].trigger_r = (uint8_t)((SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) / 32767.0f) * 255.0f);
+        SDL_GameControllerClose(controller);
+        ++i;
     }
 }
 

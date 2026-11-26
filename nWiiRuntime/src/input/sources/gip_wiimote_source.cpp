@@ -31,6 +31,9 @@ struct Wire {
     std::atomic<int32_t> acc_z{0x200};
     std::atomic<int32_t> ir_x{512};
     std::atomic<int32_t> ir_y{384};
+    std::atomic<int32_t> stick_x{0};
+    std::atomic<int32_t> stick_y{0};
+    std::atomic<bool> nunchuk{false};
 };
 
 Wire& wire() {
@@ -55,13 +58,11 @@ uint32_t wiimote_buttons(const State& s) {
     if (s.buttons & Button::Y) b |= 0x0100;       // 2
     if (s.buttons & Button::Menu) b |= 0x0010;    // +
     if (s.buttons & Button::View) b |= 0x1000;    // -
-    if (s.guide) b |= 0x0080;                     // Home
+    if (s.guide) b |= WiiHome;                     // Home
     if (s.buttons & Button::Up) b |= 0x0008;
     if (s.buttons & Button::Down) b |= 0x0004;
     if (s.buttons & Button::Left) b |= 0x0001;
     if (s.buttons & Button::Right) b |= 0x0002;
-    if (s.buttons & Button::LeftBumper) b |= 0x0200;
-    if (s.buttons & Button::RightBumper) b |= 0x0100;
     return b;
 }
 
@@ -103,12 +104,12 @@ void publish_guest(CPUContext& ctx) {
     // WPADProbe returns the word at +0x900. -1 means no controller.
     if ((int32_t)ctx.mmu.read32(dev + 2304) == -1)
         ctx.mmu.write32(dev + 2304, 0);
-    if (ctx.mmu.read8(dev + 2309) == 0xFD)
-        ctx.mmu.write8(dev + 2309, 0);
+    Wire& w = wire();
+    const uint8_t extension = w.nunchuk.load() ? 1 : 0;
+    ctx.mmu.write8(dev + 2309, extension);
     if (ctx.mmu.read32(dev + 2336) == 0)
         ctx.mmu.write32(dev + 2336, 1);
 
-    Wire& w = wire();
     const uint16_t buttons = (uint16_t)w.buttons.load();
     const int16_t ax = (int16_t)w.acc_x.load();
     const int16_t ay = (int16_t)w.acc_y.load();
@@ -127,8 +128,14 @@ void publish_guest(CPUContext& ctx) {
         ctx.mmu.write16(base + 10, (uint16_t)iy);
         ctx.mmu.write16(base + 12, 8);
         ctx.mmu.write8(base + 14, 1);
-        ctx.mmu.write8(base + 40, 0); // WPAD_DEV_CORE
+        ctx.mmu.write8(base + 40, extension);
         ctx.mmu.write8(base + 41, 0); // WPAD_ERR_NONE
+        // WPADFSStatus: extension acceleration and signed, centered stick.
+        ctx.mmu.write16(base + 42, 0);
+        ctx.mmu.write16(base + 44, 0);
+        ctx.mmu.write16(base + 46, 512);
+        ctx.mmu.write8(base + 48, (uint8_t)w.stick_x.load());
+        ctx.mmu.write8(base + 49, (uint8_t)w.stick_y.load());
     }
 }
 
@@ -190,14 +197,18 @@ void GipWiimoteSource::update(GameCubePadState pads[4], WiimoteState motes[4]) {
         if (motes[0].ir_x > 1.0f) motes[0].ir_x = 1.0f;
         if (motes[0].ir_y < 0.0f) motes[0].ir_y = 0.0f;
         if (motes[0].ir_y > 1.0f) motes[0].ir_y = 1.0f;
-        motes[0].accel_x = nwii::gip::stickValue(gip_state.leftX);
-        motes[0].accel_y = nwii::gip::stickValue(gip_state.leftY);
+        set_nunchuk(motes[0], gip_state.leftX, gip_state.leftY,
+            (gip_state.buttons & (Button::LeftBumper | Button::RightBumper)) != 0,
+            gip_state.leftTrigger > 512 || gip_state.rightTrigger > 512);
         motes[0].accel_z = 1.0f;
         apply_gc(pads[0], gip_state);
     }
 
     Wire& w = wire();
     w.buttons.store(motes[0].buttons);
+    w.stick_x.store((int32_t)(motes[0].nunchuk_x * 127.0f));
+    w.stick_y.store((int32_t)(motes[0].nunchuk_y * 127.0f));
+    w.nunchuk.store(motes[0].nunchuk_connected);
     w.acc_x.store((int32_t)(motes[0].accel_x * 256.0f));
     w.acc_y.store((int32_t)(motes[0].accel_y * 256.0f));
     int32_t az = (int32_t)(motes[0].accel_z * 512.0f);

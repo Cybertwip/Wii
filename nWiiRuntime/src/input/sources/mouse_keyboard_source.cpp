@@ -15,13 +15,16 @@ void MouseKeyboardSource::update(GameCubePadState pads[4], WiimoteState motes[4]
     if (w == 0) w = 640;
     if (h == 0) h = 480;
     
-    motes[0].ir_x = (float)mx / (float)w;
-    motes[0].ir_y = (float)my / (float)h;
+    // The gamepad source owns the pointer while a controller is connected.
+    if (!motes[0].nunchuk_connected) {
+        motes[0].ir_x = (float)mx / (float)w;
+        motes[0].ir_y = (float)my / (float)h;
+    }
 
     if (mouse_state & SDL_BUTTON(SDL_BUTTON_LEFT)) motes[0].buttons |= 0x0800; 
     if (mouse_state & SDL_BUTTON(SDL_BUTTON_RIGHT)) motes[0].buttons |= 0x0400; 
     if (keys[SDL_SCANCODE_RETURN]) motes[0].buttons |= 0x0010; 
-    if (keys[SDL_SCANCODE_BACKSPACE]) motes[0].buttons |= 0x0001; 
+    if (keys[SDL_SCANCODE_BACKSPACE]) motes[0].buttons |= 0x1000; 
     if (keys[SDL_SCANCODE_UP]) motes[0].buttons |= 0x0008; 
     if (keys[SDL_SCANCODE_DOWN]) motes[0].buttons |= 0x0004; 
     if (keys[SDL_SCANCODE_LEFT]) motes[0].buttons |= 0x0001; 
