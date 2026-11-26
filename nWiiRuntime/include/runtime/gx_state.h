@@ -73,6 +73,9 @@ struct GXState {
   uint32_t cp[256];
   uint32_t xf[256];
   uint32_t bp[256];
+  // The TEV register address selects a component pair; bit 23 selects its bank.
+  uint32_t tevColor[8] = {};
+  uint32_t tevKonst[8] = {};
 
   
   VATSlot vat[8];

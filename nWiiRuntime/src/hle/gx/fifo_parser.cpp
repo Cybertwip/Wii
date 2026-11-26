@@ -27,6 +27,8 @@ extern GXState g_state;
 // indexed 0x20-0x38) are applied here as the stream is parsed, so each draw
 // can snapshot the matrix that is current at its point in the stream — before
 // the renderer applies later loads over the same slot.
+static uint32_t g_parse_bp[256] = {};
+static uint32_t g_parse_bp_mask = 0xFFFFFF;
 static float g_parse_posmtx[256] = {0};
 static float g_parse_nrmmtx[96] = {0};
 
@@ -60,7 +62,14 @@ namespace {
 
     void ApplyBPRegisterImpl(uint8_t reg, uint32_t val);
 
-    void ParseBP(uint8_t reg, uint32_t val) {
+    uint32_t ParseBP(uint8_t reg, uint32_t val) {
+        if (reg == 0xFE) {
+            g_parse_bp_mask = val & 0xFFFFFF;
+        } else {
+            val = (g_parse_bp[reg] & ~g_parse_bp_mask) | (val & g_parse_bp_mask);
+            g_parse_bp_mask = 0xFFFFFF;
+        }
+        g_parse_bp[reg] = val;
 
         
         
@@ -73,17 +82,15 @@ namespace {
         }
 
         
-        // from the wrong state is cached for the rest of the run. Dolphin's
-
-        // time. NWII_NOSEED=1 takes the Dolphin behaviour.
-        static const bool no_seed = std::getenv("NWII_NOSEED") != nullptr;
-        if (!no_seed)
-            g_state.bp[reg] = val;
+        return val;
     }
 
     void ApplyBPRegisterImpl(uint8_t reg, uint32_t val) {
         g_state.bp[reg] = val;
-        if (reg == 0x00) {
+        if (reg >= 0xE0 && reg <= 0xE7) {
+            auto& bank = (val & 0x800000) ? g_state.tevKonst : g_state.tevColor;
+            bank[reg - 0xE0] = val;
+        } else if (reg == 0x00) {
             g_state.numTexGens = (val & 0xF);
             g_state.numChans = ((val >> 4) & 0x7);
             g_state.numTevStages = ((val >> 10) & 0xF) + 1;
@@ -545,6 +552,9 @@ static void skin_report() {
 static uint64_t DLStateHash() {
     uint64_t h = 14695981039346656037ull;
     for (int r = 0x30; r <= 0xBF; ++r) { h ^= g_state.cp[r]; h *= 1099511628211ull; }
+    // Cached display lists include resolved masked BP writes.
+    for (uint32_t v : g_parse_bp) { h ^= v; h *= 1099511628211ull; }
+    h ^= g_parse_bp_mask; h *= 1099511628211ull;
     h ^= g_state.xf[0x00E]; h *= 1099511628211ull;
     h ^= g_state.xf[0x00F]; h *= 1099511628211ull;
     return h;
@@ -587,7 +597,7 @@ static void ExpandDisplayList(uint32_t addr, uint32_t size,
                 if (c.type == GXCommandType::CPRegister)
                     ParseCP((uint8_t)c.reg, c.val);
                 else if (c.type == GXCommandType::BPRegister)
-                    ParseBP((uint8_t)c.reg, c.val);
+                    c.val = ParseBP((uint8_t)c.reg, c.val);
                 else if (c.type == GXCommandType::XFRegister &&
                          (c.val & 0x80000000u)) {
                     // LOAD_INDX marker: re-read the (possibly animated)
@@ -891,8 +901,8 @@ static void ParseStream(const std::vector<uint8_t>& fifo, size_t& offset, std::v
             GXCommand c;
             c.reg = reg;
             if (kind == 0) {
-                uint32_t merged = (g_state.bp[reg] & ~mask) | (val & mask);
-                ParseBP(reg, merged);
+                uint32_t merged = (g_parse_bp[reg] & ~mask) | (val & mask);
+                merged = ParseBP(reg, merged);
                 c.type = GXCommandType::BPRegister;
                 c.val = merged;
             } else {
@@ -952,7 +962,7 @@ static void ParseStream(const std::vector<uint8_t>& fifo, size_t& offset, std::v
             if (offset + 5 > fifo_size) break;
             uint8_t reg = fifo[offset + 1];
             uint32_t val = Read24(fifo, offset + 2);
-            ParseBP(reg, val);
+            val = ParseBP(reg, val);
 
             GXCommand c;
             c.type = GXCommandType::BPRegister;

@@ -631,22 +631,18 @@ static void SetupDrawState(const GXCommand &cmd) {
   };
 
   for (int i = 0; i < 4; i++) {
-    uint32_t ra = g_state.bp[0xE0 + i * 2];
-    uint32_t bg = g_state.bp[0xE1 + i * 2];
-    if (((ra >> 23) & 1) == 0) {
-      color[i * 4 + 0] = decode11(ra, 0);
-      color[i * 4 + 3] = decode11(ra, 12);
-    } else {
-      kcolor[i * 4 + 0] = decode11(ra, 0);
-      kcolor[i * 4 + 3] = decode11(ra, 12);
-    }
-    if (((bg >> 23) & 1) == 0) {
-      color[i * 4 + 2] = decode11(bg, 0);
-      color[i * 4 + 1] = decode11(bg, 12);
-    } else {
-      kcolor[i * 4 + 2] = decode11(bg, 0);
-      kcolor[i * 4 + 1] = decode11(bg, 12);
-    }
+    const uint32_t ra = g_state.tevColor[i * 2];
+    const uint32_t bg = g_state.tevColor[i * 2 + 1];
+    const uint32_t kra = g_state.tevKonst[i * 2];
+    const uint32_t kbg = g_state.tevKonst[i * 2 + 1];
+    color[i * 4 + 0] = decode11(ra, 0);
+    color[i * 4 + 3] = decode11(ra, 12);
+    color[i * 4 + 2] = decode11(bg, 0);
+    color[i * 4 + 1] = decode11(bg, 12);
+    kcolor[i * 4 + 0] = (kra & 0xFF) / 255.0f;
+    kcolor[i * 4 + 3] = ((kra >> 12) & 0xFF) / 255.0f;
+    kcolor[i * 4 + 2] = (kbg & 0xFF) / 255.0f;
+    kcolor[i * 4 + 1] = ((kbg >> 12) & 0xFF) / 255.0f;
   }
 
   static const bool s_tevtrace = std::getenv("NWII_TEVTRACE") != nullptr;

@@ -309,7 +309,9 @@ vec4 dolphin_chan(int chan, vec3 pos, vec3 nrm, vec4 vcol) {
         fs << "    tevReg[" << (int)stage.alphaRegId << "].a = aOut;\n    }\n";
     }
     
-    fs << "    FragColor = tevReg[0];\n";
+    const auto& last = state.tevStages[numTevs - 1];
+    fs << "    FragColor = vec4(tevReg[" << int(last.colorRegId)
+       << "].rgb, tevReg[" << int(last.alphaRegId) << "].a);\n";
 
     
     if (std::getenv("NWII_FLATCOLOR"))
