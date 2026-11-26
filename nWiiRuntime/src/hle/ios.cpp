@@ -1410,9 +1410,6 @@ bool process_pending_callbacks(CPUContext &ctx) {
   debug_loader_snapshot(ctx);
   input::gip_satisfy_bta_device_up(ctx);
   repair_ready_runqueue(ctx);
-  escape_di_slot_spin(ctx);
-  service_stuck_dvd_read(ctx);
-  service_sdk_dvd_sync(ctx);
   clamp_extsh_content_scan(ctx);
   yield_to_ready_thread(ctx);
 

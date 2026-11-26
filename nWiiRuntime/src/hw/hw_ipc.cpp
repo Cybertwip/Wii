@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
+#include <deque>
 
 namespace nwii::runtime {
     extern CPUContext* g_ctx_ptr;
@@ -19,16 +20,27 @@ static uint32_t ipc_arm_msg = 0;
 static uint32_t ipc_arm_ctrl = 0;
 static uint32_t ipc_ppc_ctrl = 0;
 uint32_t ipc_ppc_msg = 0;
+static std::deque<uint32_t> pending_replies;
+
+// The ARM mailbox holds exactly one reply until PPC acknowledges Y1.
+static void publish_reply() {
+    if ((ipc_ppc_ctrl & 0x04) || pending_replies.empty()) return;
+    ipc_arm_msg = pending_replies.front();
+    pending_replies.pop_front();
+    ipc_ppc_ctrl |= 0x04;
+    ipc_arm_ctrl = 0x02;
+    nwii::runtime::g_ipc_interrupt_delay = 50;
+}
+
+static void queue_reply(uint32_t req_addr) {
+    pending_replies.push_back(req_addr & 0x1FFFFFFF);
+    publish_reply();
+}
 
 extern "C" int32_t handle_ios_ipc(nwii::runtime::CPUContext& ctx, uint32_t request_addr);
 
 int32_t dispatch_ipc(CPUContext& ctx, uint32_t virt_addr) {
-  int32_t result = handle_ios_ipc(ctx, virt_addr);
-
-  ipc_arm_msg  = virt_addr & 0x1FFFFFFF;
-  ipc_arm_ctrl = 0x00000003; 
-  
-  return result;
+  return handle_ios_ipc(ctx, virt_addr);
 }
 
 int32_t ipc_dispatch_request(CPUContext &ctx, uint32_t req_addr) {
@@ -40,19 +52,11 @@ int32_t ipc_dispatch_request(CPUContext &ctx, uint32_t req_addr) {
 }
 
 void hle_set_ipc_arm_msg(uint32_t req_addr) {
-  ipc_arm_msg = req_addr & 0x1FFFFFFF;
-  ipc_arm_ctrl = 0x00000002;
-  ipc_ppc_ctrl |= 0x00000004;
-  g_ipc_interrupt_delay = 5000;
+  queue_reply(req_addr);
 }
 
-
-
 void ipc_post_reply(uint32_t req_addr) {
-  ipc_arm_msg = req_addr & 0x1FFFFFFF;
-  ipc_ppc_ctrl &= ~0x01;
-  ipc_ppc_ctrl |= 0x26; 
-  g_ipc_interrupt_delay = 50;
+  queue_reply(req_addr);
 }
 
 // A DI read sets g_di_reply_ticks to model real disc transfer/seek latency.
@@ -63,14 +67,10 @@ void ipc_post_reply(uint32_t req_addr) {
 // completion callback matches the stale entry and the waited entry stalls.
 uint64_t g_di_reply_ticks = 0;
 
-void ipc_schedule_di_reply(uint64_t ticks) {
-  uint32_t arm = ipc_arm_msg;
+void ipc_schedule_di_reply(uint32_t req_addr, uint64_t ticks) {
   nwii::runtime::EventScheduler::get().schedule_after(
-      ticks, [arm](CPUContext&, uint64_t) {
-        ipc_arm_msg = arm;
-        ipc_ppc_ctrl &= ~0x01;
-        ipc_ppc_ctrl |= 0x26;
-        trigger_pi_interrupt(0x00004000);
+      ticks, [req_addr](CPUContext&, uint64_t) {
+        queue_reply(req_addr);
       });
 }
 
@@ -107,52 +107,42 @@ void register_ipc(MMIODispatcher& dispatcher) {{
                 break;
             }
             case 0x000004: {
-                uint32_t old_ctrl = ipc_ppc_ctrl;
-
+                // Acknowledge existing events before handling a new request.
                 ipc_ppc_ctrl = (ipc_ppc_ctrl & ~0x30) | (val & 0x30);
+                if (val & 0x04) ipc_ppc_ctrl &= ~0x04;
+                if (val & 0x02) ipc_ppc_ctrl &= ~0x02;
+                if (val & 0x08) ipc_ppc_ctrl &= ~0x08;
 
                 if (val & 0x01) {
-                    
                     ipc_ppc_ctrl |= 0x01;
-                    int32_t result = 0;
-                    if (g_ctx_ptr) {
-                        
-                        result = ipc_dispatch_request(*g_ctx_ptr, ipc_ppc_msg);
-                    }
+                    const uint32_t request = ipc_ppc_msg;
+                    int32_t result = g_ctx_ptr
+                        ? ipc_dispatch_request(*g_ctx_ptr, request) : -8;
                     std::cout << "[IPC] Request sent from PPC! result=" << result << "\n";
+                    ipc_ppc_ctrl &= ~0x01;
+                    ipc_ppc_ctrl |= 0x02;
+                    g_ipc_interrupt_delay = 50;
                     if (result != -0x70000001) {
-                        ipc_ppc_ctrl &= ~0x01;
                         if (g_di_reply_ticks > 0) {
-                            // Free the mailbox now; defer the completion reply
-                            // (Y1 + interrupt) to model disc latency.
-                            ipc_ppc_ctrl |= 0x22;
-                            ipc_schedule_di_reply(g_di_reply_ticks);
+                            ipc_schedule_di_reply(request, g_di_reply_ticks);
                             g_di_reply_ticks = 0;
                         } else {
-                            ipc_ppc_ctrl |= 0x26;
-                            g_ipc_interrupt_delay = 50;
+                            queue_reply(request);
                         }
-                    } else {
-                        // The result word stays unset and ipc_post_reply()
-                        // raises Y1 later. Y2 alone frees the PPC mailbox.
-                        // The client will not send the next queued request
-                        // until Y2, so a pending USB read must not hold it.
-                        // Do not set Y1 here: that delivers a completion for
-                        // a request that is still pending.
-                        ipc_ppc_ctrl &= ~0x01;
-                        ipc_ppc_ctrl |= 0x22;
-                        g_ipc_interrupt_delay = 50;
-                        std::cout << "[IPC] NO_REPLY, mailbox free (Y2)\n";
                     }
                 }
-
-                if (val & 0x04) ipc_ppc_ctrl &= ~0x04; 
-                if (val & 0x02) ipc_ppc_ctrl &= ~0x02; 
-                if (val & 0x08) ipc_ppc_ctrl &= ~0x08; 
-                (void)old_ctrl;
+                publish_reply();
                 break;
             }
 
+            case 0x000030:
+                if (val & 0x4000) {
+                    clear_pi_interrupt(0x4000);
+                    if (((ipc_ppc_ctrl & 0x14) == 0x14) ||
+                        ((ipc_ppc_ctrl & 0x22) == 0x22))
+                        g_ipc_interrupt_delay = 50;
+                }
+                break;
             case 0x00000C: {
                 ipc_arm_ctrl &= ~(val & 0x03);
                 if (!(ipc_arm_ctrl & 3)) {
