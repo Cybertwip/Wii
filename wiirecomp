@@ -273,14 +273,14 @@ def parse_resolution(value):
 
 def runtime_resolution(runtime, scale):
     # Preserve the source project's configuration and set only the packaged copy.
-    section = re.search(r'^\[graphics\][ \t]*(?:#.*)?$', runtime, re.MULTILINE)
+    section = re.search(r'^[ \t]*\[graphics\][ \t]*(?:#.*)?$', runtime, re.MULTILINE)
     if not section:
         return runtime.rstrip() + f'\n\n[graphics]\nresolution = {scale}\n'
     start = section.end()
-    following = re.search(r'^\[', runtime[start:], re.MULTILINE)
+    following = re.search(r'^[ \t]*\[', runtime[start:], re.MULTILINE)
     end = start + following.start() if following else len(runtime)
-    body = re.sub(r'^resolution\s*=.*(?:\n|$)', '', runtime[start:end], flags=re.MULTILINE)
-    return runtime[:start] + f'\nresolution = {scale}' + body + runtime[end:]
+    body = re.sub(r'^[ \t]*resolution[ \t]*=.*(?:\n|$)', '', runtime[start:end], flags=re.MULTILINE)
+    return runtime[:start] + f'\nresolution = {scale}\n' + body.lstrip('\n') + runtime[end:]
 
 
 def build(args):
