@@ -139,6 +139,17 @@ vec4 dolphin_chan(int chan, vec3 pos, vec3 nrm, vec4 vcol) {
     fs << "vec4 texColor;\n";
     fs << "vec4 rasColor;\n";
     
+    // TEV comparison inputs are unsigned eight-bit values, even when the
+    // source register holds a signed intermediate result.
+    fs << R"(
+ivec3 tev8(vec3 v) { return ivec3(round(v * 255.0)) & ivec3(255); }
+int tev8(float v) { return int(round(v * 255.0)) & 255; }
+int tevPack(ivec3 v, int mode) {
+    if (mode == 0) return v.r;
+    if (mode == 1) return v.r | (v.g << 8);
+    return v.r | (v.g << 8) | (v.b << 16);
+}
+)";
     fs << "void main() {\n";
     fs << "    tevReg[0] = uTevColor[0];\n";
     fs << "    tevReg[1] = uTevColor[1];\n";
@@ -154,7 +165,7 @@ vec4 dolphin_chan(int chan, vec3 pos, vec3 nrm, vec4 vcol) {
 
         if (stage.colorChan == 0) fs << "    rasColor = vColor0;\n";
         else if (stage.colorChan == 1) fs << "    rasColor = vColor1;\n";
-        else fs << "    rasColor = vec4(0.0, 0.0, 0.0, 1.0);\n";
+        else fs << "    rasColor = vec4(0.0);\n";
 
         if (stage.texMap != 0xFF) {
             fs << "    texColor = texture(uTex" << (int)stage.texMap << ", vTex" << (int)stage.texCoord << ");\n";
@@ -245,28 +256,30 @@ vec4 dolphin_chan(int chan, vec3 pos, vec3 nrm, vec4 vcol) {
         map_color_input(2, stage.colorInC);
         map_color_input(3, stage.colorInD);
         
-        fs << "    vec3 cBias;\n";
-        if (stage.colorBias == 1) fs << "    cBias = vec3(0.5);\n";
-        else if (stage.colorBias == 2) fs << "    cBias = vec3(-0.5);\n";
-        else fs << "    cBias = vec3(0.0);\n";
-
         fs << "    vec3 cOut;\n";
-        if (stage.colorOp == 0) { 
-            fs << "    cOut = cIn[3] + mix(cIn[0], cIn[1], cIn[2]) + cBias;\n";
-        } else if (stage.colorOp == 1) { 
-            fs << "    cOut = cIn[3] - mix(cIn[0], cIn[1], cIn[2]) + cBias;\n";
+        if (stage.colorBias == 3) {
+            const char* op = stage.colorOp ? "==" : ">";
+            if (stage.colorScale == 3) {
+                const char* fn = stage.colorOp ? "equal" : "greaterThan";
+                fs << "    cOut = cIn[3] + mix(vec3(0.0), cIn[2], " << fn
+                   << "(tev8(cIn[0]), tev8(cIn[1])));\n";
+            } else {
+                fs << "    cOut = cIn[3] + ((tevPack(tev8(cIn[0]), "
+                   << int(stage.colorScale) << ") " << op
+                   << " tevPack(tev8(cIn[1]), " << int(stage.colorScale)
+                   << ")) ? cIn[2] : vec3(0.0));\n";
+            }
         } else {
-            fs << "    cOut = cIn[3] + mix(cIn[0], cIn[1], cIn[2]) + cBias;\n";
+            const char* bias = stage.colorBias == 1 ? "0.5" :
+                               stage.colorBias == 2 ? "-0.5" : "0.0";
+            fs << "    cOut = cIn[3] " << (stage.colorOp ? "-" : "+")
+               << " mix(cIn[0], cIn[1], cIn[2]) + vec3(" << bias << ");\n";
+            if (stage.colorScale == 1) fs << "    cOut *= 2.0;\n";
+            else if (stage.colorScale == 2) fs << "    cOut *= 4.0;\n";
+            else if (stage.colorScale == 3) fs << "    cOut *= 0.5;\n";
         }
-        
-        if (stage.colorScale == 1) fs << "    cOut *= 2.0;\n";
-        else if (stage.colorScale == 2) fs << "    cOut *= 4.0;\n";
-        else if (stage.colorScale == 3) fs << "    cOut *= 0.5;\n";
+        if (stage.colorClamp) fs << "    cOut = clamp(cOut, 0.0, 1.0);\n";
 
-        if (stage.colorClamp == 1) fs << "    cOut = clamp(cOut, 0.0, 1.0);\n";
-
-        fs << "    tevReg[" << (int)stage.colorRegId << "].rgb = cOut;\n";
-        
         fs << "    float aIn[4];\n";
         auto map_alpha_input = [&](int in_idx, int arg) {
             switch(arg) {
@@ -286,26 +299,31 @@ vec4 dolphin_chan(int chan, vec3 pos, vec3 nrm, vec4 vcol) {
         map_alpha_input(2, stage.alphaInC);
         map_alpha_input(3, stage.alphaInD);
         
-        fs << "    float aBias;\n";
-        if (stage.alphaBias == 1) fs << "    aBias = 0.5;\n";
-        else if (stage.alphaBias == 2) fs << "    aBias = -0.5;\n";
-        else fs << "    aBias = 0.0;\n";
-
         fs << "    float aOut;\n";
-        if (stage.alphaOp == 0) { 
-            fs << "    aOut = aIn[3] + mix(aIn[0], aIn[1], aIn[2]) + aBias;\n";
-        } else if (stage.alphaOp == 1) { 
-            fs << "    aOut = aIn[3] - mix(aIn[0], aIn[1], aIn[2]) + aBias;\n";
+        if (stage.alphaBias == 3) {
+            const char* op = stage.alphaOp ? "==" : ">";
+            if (stage.alphaScale == 3) {
+                fs << "    aOut = aIn[3] + ((tev8(aIn[0]) " << op
+                   << " tev8(aIn[1])) ? aIn[2] : 0.0);\n";
+            } else {
+                fs << "    aOut = aIn[3] + ((tevPack(tev8(cIn[0]), "
+                   << int(stage.alphaScale) << ") " << op
+                   << " tevPack(tev8(cIn[1]), " << int(stage.alphaScale)
+                   << ")) ? aIn[2] : 0.0);\n";
+            }
         } else {
-            fs << "    aOut = aIn[3] + mix(aIn[0], aIn[1], aIn[2]) + aBias;\n";
+            const char* bias = stage.alphaBias == 1 ? "0.5" :
+                               stage.alphaBias == 2 ? "-0.5" : "0.0";
+            fs << "    aOut = aIn[3] " << (stage.alphaOp ? "-" : "+")
+               << " mix(aIn[0], aIn[1], aIn[2]) + " << bias << ";\n";
+            if (stage.alphaScale == 1) fs << "    aOut *= 2.0;\n";
+            else if (stage.alphaScale == 2) fs << "    aOut *= 4.0;\n";
+            else if (stage.alphaScale == 3) fs << "    aOut *= 0.5;\n";
         }
-        
-        if (stage.alphaScale == 1) fs << "    aOut *= 2.0;\n";
-        else if (stage.alphaScale == 2) fs << "    aOut *= 4.0;\n";
-        else if (stage.alphaScale == 3) fs << "    aOut *= 0.5;\n";
+        if (stage.alphaClamp) fs << "    aOut = clamp(aOut, 0.0, 1.0);\n";
 
-        if (stage.alphaClamp == 1) fs << "    aOut = clamp(aOut, 0.0, 1.0);\n";
-
+        // Both combiners read the register values at the start of the stage.
+        fs << "    tevReg[" << int(stage.colorRegId) << "].rgb = cOut;\n";
         fs << "    tevReg[" << (int)stage.alphaRegId << "].a = aOut;\n    }\n";
     }
     
@@ -322,23 +340,22 @@ vec4 dolphin_chan(int chan, vec3 pos, vec3 nrm, vec4 vcol) {
     {
         const auto& at = state.alphaTest;
         auto cmp = [&](uint8_t comp, uint8_t ref) -> std::string {
-            char rb[32];
-            std::snprintf(rb, sizeof(rb), "%.6f", ref / 255.0f);
-            std::string r(rb);
+            const std::string r = std::to_string(ref);
             switch (comp) {
                 case 0: return "false";
-                case 1: return "FragColor.a < " + r;
-                case 2: return "FragColor.a == " + r;
-                case 3: return "FragColor.a <= " + r;
-                case 4: return "FragColor.a > " + r;
-                case 5: return "FragColor.a != " + r;
-                case 6: return "FragColor.a >= " + r;
+                case 1: return "alpha8 < " + r;
+                case 2: return "alpha8 == " + r;
+                case 3: return "alpha8 <= " + r;
+                case 4: return "alpha8 > " + r;
+                case 5: return "alpha8 != " + r;
+                case 6: return "alpha8 >= " + r;
                 default: return "true";
             }
         };
         bool disabled = (at.comp0 == 7 && at.comp1 == 7 && at.logic == 0) ||
                         std::getenv("NWII_NOALPHATEST") != nullptr;
         if (!disabled) {
+            fs << "    int alpha8 = int(round(clamp(FragColor.a, 0.0, 1.0) * 255.0));\n";
             std::string a = cmp(at.comp0, at.ref0);
             std::string b = cmp(at.comp1, at.ref1);
             std::string test;

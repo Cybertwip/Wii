@@ -808,6 +808,9 @@ int main(int argc, char **argv) {
         int draw_w = 0, draw_h = 0;
         SDL_GL_GetDrawableSize(window, &draw_w, &draw_h);
         glViewport(0, 0, draw_w, draw_h);
+        glDisable(GL_SCISSOR_TEST);
+        glDisable(GL_COLOR_LOGIC_OP);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         glClearColor(0, 0, 0, 1);
         glClear(GL_COLOR_BUFFER_BIT);
 

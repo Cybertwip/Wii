@@ -5,6 +5,7 @@
 #include "runtime/gx/tev_shader_gen.h"
 #include "runtime/gx_state.h"
 #include "runtime/texture_cache_gl.h"
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -195,8 +196,8 @@ static void ApplyProjection(GLint uProj) {
     p[13] = sp[3];
     p[2] = 0;
     p[6] = 0;
-    p[10] = sp[4];
-    p[14] = sp[5];
+    p[10] = 2.0f * sp[4];
+    p[14] = 2.0f * sp[5] + 1.0f;
     p[3] = 0;
     p[7] = 0;
     p[11] = 0;
@@ -214,49 +215,89 @@ static void ApplyProjection(GLint uProj) {
   glUniformMatrix4fv(uProj, 1, GL_FALSE, p);
 }
 
-static bool CurrentIsPerspective() {
-  static const bool flatz = std::getenv("NWII_FLATZ") != nullptr;
-  if (flatz)
-    return false;
-  return g_state.projSet && g_state.projType == 0;
-}
-
 static void ApplyZMode() {
-
-  if (CurrentIsPerspective()) {
+  static const GLenum functions[] = {GL_NEVER, GL_LESS, GL_EQUAL, GL_LEQUAL,
+      GL_GREATER, GL_NOTEQUAL, GL_GEQUAL, GL_ALWAYS};
+  const auto &z = g_state.zMode;
+  if (z.enable && !std::getenv("NWII_FLATZ")) {
     glEnable(GL_DEPTH_TEST);
-    glDepthFunc(GL_LEQUAL);
+    glDepthFunc(functions[z.func & 7]);
+    glDepthMask(z.update ? GL_TRUE : GL_FALSE);
   } else {
     glDisable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);
   }
 }
 
-// Apply the GX blend state (BP 0x41 = PE_CMODE0). Without it every draw is
-// opaque, so alpha fades (the WARNING "press" blink), transparent UI and the
-// dialogue window never composite. The src/dst factor tables follow the
-// documented GX->GL factor order (src uses DST_COLOR at index 2/3, dst uses
-// SRC_COLOR).
-static void ApplyBlend() {
-  uint32_t cm = g_state.bp[0x41];
-  bool enable = cm & 1;
-  bool subtract = (cm >> 11) & 1;
-  int dstF = (cm >> 5) & 7;
-  int srcF = (cm >> 8) & 7;
-  if (!enable) { glDisable(GL_BLEND); return; }
-  static const GLenum srcMap[8] = {
-      GL_ZERO, GL_ONE, GL_DST_COLOR, GL_ONE_MINUS_DST_COLOR,
-      GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA};
-  static const GLenum dstMap[8] = {
-      GL_ZERO, GL_ONE, GL_SRC_COLOR, GL_ONE_MINUS_SRC_COLOR,
-      GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA};
-  glEnable(GL_BLEND);
-  if (subtract) {
-    glBlendEquation(GL_FUNC_REVERSE_SUBTRACT);
-    glBlendFunc(GL_ONE, GL_ONE);
-  } else {
-    glBlendEquation(GL_FUNC_ADD);
-    glBlendFunc(srcMap[srcF], dstMap[dstF]);
+static void ApplyScissor() {
+  if (!(g_state.bp[0x20] || g_state.bp[0x21])) {
+    glDisable(GL_SCISSOR_TEST);
+    return;
   }
+  const uint32_t tl = g_state.bp[0x20], br = g_state.bp[0x21];
+  const uint32_t offset = g_state.bp[0x59];
+  const int ox = offset ? int(offset & 0x3ff) * 2 : 342;
+  const int oy = offset ? int((offset >> 10) & 0x3ff) * 2 : 342;
+  const int left = std::clamp(int((tl >> 12) & 0x7ff) - ox, 0, 640);
+  const int top = std::clamp(int(tl & 0x7ff) - oy, 0, 480);
+  const int right = std::clamp(int((br >> 12) & 0x7ff) - ox + 1, left, 640);
+  const int bottom = std::clamp(int(br & 0x7ff) - oy + 1, top, 480);
+  const int scale = Config::get().resolution_scale;
+  glEnable(GL_SCISSOR_TEST);
+  glScissor(left * scale, (480 - bottom) * scale,
+            (right - left) * scale, (bottom - top) * scale);
+}
+
+// GX PE_CMODE0 controls writes as well as blending and logic operations.
+static void ApplyBlend() {
+  const uint32_t cm = g_state.bp[0x41];
+  const bool color_write = (cm & 8) != 0;
+  const bool alpha_write = (cm & 16) != 0;
+  glColorMask(color_write, color_write, color_write, alpha_write);
+  const bool subtract = (cm & 0x800) != 0;
+  const bool blend = (cm & 1) != 0 || subtract;
+  const bool logic = !blend && (cm & 2) != 0;
+  static const GLenum logic_ops[] = {GL_CLEAR, GL_AND, GL_AND_REVERSE,
+      GL_COPY, GL_AND_INVERTED, GL_NOOP, GL_XOR, GL_OR, GL_NOR, GL_EQUIV,
+      GL_INVERT, GL_OR_REVERSE, GL_COPY_INVERTED, GL_OR_INVERTED, GL_NAND, GL_SET};
+  if (logic) {
+    glEnable(GL_COLOR_LOGIC_OP);
+    glLogicOp(logic_ops[(cm >> 12) & 15]);
+  } else {
+    glDisable(GL_COLOR_LOGIC_OP);
+  }
+  if (!blend) {
+    glDisable(GL_BLEND);
+    return;
+  }
+  static const GLenum srcMap[] = {GL_ZERO, GL_ONE, GL_DST_COLOR,
+      GL_ONE_MINUS_DST_COLOR, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
+      GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA};
+  static const GLenum dstMap[] = {GL_ZERO, GL_ONE, GL_SRC_COLOR,
+      GL_ONE_MINUS_SRC_COLOR, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
+      GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA};
+  GLenum src = srcMap[(cm >> 8) & 7], dst = dstMap[(cm >> 5) & 7];
+  // RGB8 and RGB565 EFB formats have implicit destination alpha of one.
+  if ((g_state.bp[0x43] & 7) != 1) {
+    if (src == GL_DST_ALPHA) src = GL_ONE;
+    if (src == GL_ONE_MINUS_DST_ALPHA) src = GL_ZERO;
+    if (dst == GL_DST_ALPHA) dst = GL_ONE;
+    if (dst == GL_ONE_MINUS_DST_ALPHA) dst = GL_ZERO;
+  }
+  glEnable(GL_BLEND);
+  glBlendEquation(subtract ? GL_FUNC_REVERSE_SUBTRACT : GL_FUNC_ADD);
+  glBlendFunc(subtract ? GL_ONE : src, subtract ? GL_ONE : dst);
+}
+
+static void ClearEFB() {
+  glDisable(GL_SCISSOR_TEST);
+  glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+  glDepthMask(GL_TRUE);
+  unsigned char cc[4];
+  ::GX_GetClearColor(cc);
+  glClearColor(cc[0] / 255.f, cc[1] / 255.f, cc[2] / 255.f, cc[3] / 255.f);
+  glClearDepth(double(g_state.bp[0x51]) / 16777215.0);
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 }
 
 // Backface culling from BP 0x00 (GEN_MODE), bits 14-15: 0 none, 1 cull back,
@@ -351,7 +392,7 @@ static void EmitVertex(const VertexData &vtx) {
     bv.z = z;
   }
 
-  if (!CurrentIsPerspective())
+  if (std::getenv("NWII_FLATZ"))
     bv.z = 0.0f;
   static const bool s_vtxtrace_v = std::getenv("NWII_VTXTRACE") != nullptr;
   if (s_vtxtrace_v) {
@@ -554,6 +595,7 @@ static void SetupDrawState(const GXCommand &cmd) {
   ApplyProjection(s_active_shader.uProjMtx);
   ApplyZMode();
   ApplyBlend();
+  ApplyScissor();
   ApplyCullMode();
 
   for (int i = 0; i < 8; ++i) {
@@ -712,15 +754,10 @@ public:
 
   void Render(const std::vector<GXCommand> &commands) override {
 
-    glDepthMask(GL_TRUE);
-    glClear(GL_DEPTH_BUFFER_BIT);
-    s_compiles_this_frame = 0; // reset the per-frame shader compile budget
+    s_compiles_this_frame = 0;
     if (g_state.pe_clear_pending) {
       g_state.pe_clear_pending = false;
-      unsigned char cc[4];
-      ::GX_GetClearColor(cc);
-      glClearColor(cc[0] / 255.f, cc[1] / 255.f, cc[2] / 255.f, cc[3] / 255.f);
-      glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+      ClearEFB();
     }
 
     for (const auto &cmd : commands) {
@@ -790,6 +827,7 @@ public:
             glBindFramebuffer(GL_DRAW_FRAMEBUFFER, copy_fbo);
             glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                                    GL_TEXTURE_2D, tex, 0);
+            glDisable(GL_SCISSOR_TEST);
             glBlitFramebuffer(x, y, x + w * scale, y - h * scale,
                               0, 0, w * scale, h * scale, GL_COLOR_BUFFER_BIT, GL_NEAREST);
             glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
@@ -801,11 +839,7 @@ public:
             nwii::runtime::hle::TextureCache::get().register_efb_texture(dest,
                                                                          tex);
             if (cmd.val & 0x800) {
-              unsigned char cc[4];
-              ::GX_GetClearColor(cc);
-              glClearColor(cc[0] / 255.f, cc[1] / 255.f, cc[2] / 255.f,
-                           cc[3] / 255.f);
-              glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+              ClearEFB();
               g_state.pe_clear_pending = false;
             }
           }

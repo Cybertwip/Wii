@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <mutex>
 #include <vector>
+#include "ax_mixer.h"
 
 namespace nwii::runtime {
     extern MMU* g_mmu;
@@ -77,7 +78,8 @@ static uint32_t adma_addr = 0;
 static uint16_t adma_control = 0;   
 static uint64_t s_adma_event_id = 0;
 static std::mutex adma_mutex;
-static std::vector<int16_t> adma_ring; 
+static std::vector<int16_t> adma_ring;
+static AxMixer ax_mixer;
 
 
 size_t dsp_audio_pull(int16_t* out, size_t frames) {
@@ -106,11 +108,15 @@ static void adma_event_cb(CPUContext& ctx, uint64_t late) {
                       << std::dec << " bytes=" << bytes << " nonzero=" << nonzero << std::endl;
         }
         std::lock_guard<std::mutex> lock(adma_mutex);
-        if (adma_ring.size() < 32000 * 2) {
+        if (adma_ring.size() + bytes / 2 > 32000 / 5 * 2) {
+            const size_t discard = std::min(adma_ring.size(), adma_ring.size() + bytes / 2 - 32000 / 5 * 2);
+            adma_ring.erase(adma_ring.begin(), adma_ring.begin() + discard);
+        }
+        {
             uint32_t va = adma_addr | 0x80000000;
             for (uint32_t i = 0; i + 3 < bytes; i += 4) {
-                adma_ring.push_back((int16_t)g_mmu->read16(va + i));
                 adma_ring.push_back((int16_t)g_mmu->read16(va + i + 2));
+                adma_ring.push_back((int16_t)g_mmu->read16(va + i));
             }
         }
     }
@@ -195,7 +201,8 @@ void register_dsp(MMIODispatcher& dispatcher) {{
                 
                 
                 static uint16_t s_cpu_mail_hi = 0;
-                static int s_ax_state = 0; 
+                static int s_ax_state = 0;
+                static unsigned ax_command_bytes = 0;
                 bool completed = (addr == 0xCC005002);
                 if (addr == 0xCC005000)
                     s_cpu_mail_hi = val & 0xFFFF;
@@ -221,9 +228,11 @@ void register_dsp(MMIODispatcher& dispatcher) {{
                             std::cout << std::dec << std::endl;
                         }
                         
+                        if (g_mmu) ax_mixer.process(*g_mmu, mail, ax_command_bytes);
                         reply(0x0002); 
                         s_ax_state = 2;
                     } else if ((mail & 0xFFFF0000u) == 0xBABE0000u) {
+                        ax_command_bytes = mail & 0xffff;
                         s_ax_state = 1;
                     } else if (mail == 0xCDD10001u) {
                         reply(0x0001); 
@@ -281,7 +290,7 @@ void register_dsp(MMIODispatcher& dispatcher) {{
                     if (s_adma_event_id != 0) {
                         EventScheduler::get().cancel(s_adma_event_id);
                     }
-                    s_adma_event_id = EventScheduler::get().schedule_recurring(g_ctx_ptr->tb_freq / 200, adma_event_cb);
+                    s_adma_event_id = EventScheduler::get().schedule_recurring(std::max<uint64_t>(1, g_ctx_ptr->tb_freq * (adma_control & 0x7fff) * 8ull / 32000), adma_event_cb);
                 } else if (was_on && !(adma_control & 0x8000)) {
                     if (s_adma_event_id != 0) {
                         EventScheduler::get().cancel(s_adma_event_id);
